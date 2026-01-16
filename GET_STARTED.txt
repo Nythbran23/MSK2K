@@ -1,0 +1,202 @@
+╔═══════════════════════════════════════════════════════════════╗
+║                    MSK2K ELECTRON PROJECT                     ║
+║              Cross-Platform Desktop Application               ║
+╚═══════════════════════════════════════════════════════════════╝
+
+🎯 QUICK START
+══════════════
+
+1. Navigate to the msk2k-electron folder
+2. Run: ./setup.sh
+3. Run: npm start
+4. The app launches!
+
+📦 WHAT'S INCLUDED
+═══════════════════
+
+Complete Electron application structure:
+├── main.js              - Electron main process (spawns Python)
+├── preload.js          - Security bridge
+├── package.json        - Node config & build settings
+├── python/             - Your MSK2K Python backend
+│   ├── msk2k_audio_qso_server_Q12.py
+│   ├── msk2k_complete.py
+│   └── requirements.txt
+├── renderer/           - UI assets
+│   └── msk2k_audio_qso_ui_Q12.html
+├── build/              - Icons & build resources
+├── .github/workflows/  - GitHub Actions CI/CD
+└── Documentation       - Complete guides
+
+🚀 DEVELOPMENT
+═══════════════
+
+Run in development mode:
+    npm start
+
+Build for distribution:
+    npm run dist          # Current platform
+    npm run dist:mac      # macOS (DMG + ZIP)
+    npm run dist:win      # Windows (NSIS + portable)
+    npm run dist:linux    # Linux (AppImage + DEB)
+
+🌐 GITHUB SETUP
+════════════════
+
+Your repo: https://github.com/Nythbran23/MSK2K
+
+Initial push:
+    cd msk2k-electron
+    git init
+    git add .
+    git commit -m "Initial commit: Electron-based MSK2K"
+    git remote add origin https://github.com/Nythbran23/MSK2K.git
+    git push -u origin main
+
+See GIT_WORKFLOW.md for complete Git guide.
+
+🤖 AUTOMATED BUILDS
+════════════════════
+
+GitHub Actions will automatically build for all platforms:
+
+To create a release:
+    git tag -a v0.1.0 -m "Release v0.1.0"
+    git push origin v0.1.0
+
+GitHub Actions will:
+    ✓ Build for macOS (Intel + Apple Silicon)
+    ✓ Build for Windows (64-bit)
+    ✓ Build for Linux (AppImage + DEB)
+    ✓ Create GitHub Release
+    ✓ Attach all installers
+
+Users download from:
+    https://github.com/Nythbran23/MSK2K/releases
+
+📱 CROSS-PLATFORM FEATURES
+═══════════════════════════
+
+✓ Native window with menus
+✓ System tray support
+✓ Auto-start Python backend
+✓ Proper installers for each OS
+✓ Icon branding (add icons in build/)
+✓ Auto-updates ready (configure later)
+
+📄 DOCUMENTATION
+═════════════════
+
+README.md          - User documentation
+DEVELOPMENT.md     - Developer guide
+GIT_WORKFLOW.md    - Git commands & workflow
+build/ICONS.md     - Icon setup guide
+
+🧪 TESTING BUILDS
+══════════════════
+
+After building:
+
+macOS:
+    ./dist/MSK2K-0.1.0.dmg
+    Open DMG, drag to Applications
+
+Windows:
+    ./dist/MSK2K-Setup-0.1.0.exe
+    Run installer
+
+Linux:
+    chmod +x ./dist/MSK2K-0.1.0.AppImage
+    ./dist/MSK2K-0.1.0.AppImage
+
+🎨 CUSTOMIZATION
+═════════════════
+
+Add icons (optional but recommended):
+    build/icon.icns    - macOS icon
+    build/icon.ico     - Windows icon
+    build/icon.png     - Linux icon
+
+See build/ICONS.md for details.
+
+Modify app metadata:
+    package.json → name, version, author, description
+
+⚙️ REQUIREMENTS
+════════════════
+
+Development:
+    ✓ Node.js 16+
+    ✓ Python 3.9+
+    ✓ Git
+
+Python packages (auto-installed):
+    ✓ numpy
+    ✓ scipy
+    ✓ aiohttp
+    ✓ sounddevice
+
+🔧 TROUBLESHOOTING
+═══════════════════
+
+Port 8088 in use:
+    Kill other MSK2K instances
+    Or change PORT in main.js
+
+Python not found:
+    Ensure Python 3.9+ is installed
+    Check PATH includes Python
+
+Build fails:
+    macOS: xcode-select --install
+    Windows: Install Visual Studio Build Tools
+    Linux: sudo apt-get install -y libgtk-3-dev
+
+📞 SUPPORT
+═══════════
+
+GitHub Issues:
+    https://github.com/Nythbran23/MSK2K/issues
+
+GitHub Discussions:
+    https://github.com/Nythbran23/MSK2K/discussions
+
+✅ NEXT STEPS
+══════════════
+
+1. cd msk2k-electron
+2. ./setup.sh
+3. npm start (test it works)
+4. Add icons to build/ (optional)
+5. Commit to GitHub
+6. Test builds: npm run dist
+7. Tag a release: git tag v0.1.0
+8. Push tag: git push origin v0.1.0
+9. GitHub builds everything!
+10. Users download from Releases page
+
+🎉 CONGRATULATIONS!
+════════════════════
+
+You now have a complete cross-platform desktop application!
+
+- Development: npm start
+- Build: npm run dist
+- Release: git tag + push
+- Users: Download from GitHub Releases
+
+The Electron wrapper handles:
+    ✓ Python backend spawning
+    ✓ Window management
+    ✓ Native menus
+    ✓ Cross-platform installers
+    ✓ Automatic builds via CI/CD
+
+Your Python backend and HTML UI work exactly as before,
+now wrapped in a proper desktop application!
+
+73 de GW4WND
+
+───────────────────────────────────────────────────────────────
+
+Need help? Check the documentation files included in the project!

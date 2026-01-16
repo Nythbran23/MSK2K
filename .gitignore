@@ -1,0 +1,41 @@
+# Node modules
+node_modules/
+package-lock.json
+yarn.lock
+
+# Build outputs
+dist/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.Python
+venv/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Python virtual environments
+python/venv/
+python/env/
+
+# ADIF logs (user data - don't commit)
+*.adi
+
+# Electron builder
+.cache/
