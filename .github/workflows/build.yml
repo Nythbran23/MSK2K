@@ -2,90 +2,119 @@ name: Build MSK2K
 
 on:
   push:
-    branches: [ main ]
     tags:
       - 'v*'
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
-        include:
-          - os: macos-latest
-            platform: mac
-          - os: windows-latest
-            platform: win
-          - os: ubuntu-latest
-            platform: linux
-
-    runs-on: ${{ matrix.os }}
-
+  build-macos:
+    runs-on: macos-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-node@v4
       with:
-        node-version: '18'
-
-    - name: Setup Python
-      uses: actions/setup-python@v4
+        node-version: '20'
+    
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-
+    
     - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r python/requirements.txt
-
+      run: pip install -r python/requirements.txt
+    
     - name: Install Node dependencies
       run: npm install
-
-    - name: Build for ${{ matrix.platform }}
-      run: npm run dist:${{ matrix.platform }}
+    
+    - name: Build macOS
+      run: npm run dist:mac
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Upload artifacts (macOS)
-      if: matrix.os == 'macos-latest'
-      uses: actions/upload-artifact@v4
+    
+    - uses: actions/upload-artifact@v4
       with:
         name: msk2k-macos
         path: |
           dist/*.dmg
           dist/*.zip
 
-    - name: Upload artifacts (Windows)
-      if: matrix.os == 'windows-latest'
-      uses: actions/upload-artifact@v4
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install Python dependencies
+      run: pip install -r python/requirements.txt
+    
+    - name: Install Node dependencies
+      run: npm install
+    
+    - name: Build Windows
+      run: npm run dist:win
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - uses: actions/upload-artifact@v4
       with:
         name: msk2k-windows
-        path: |
-          dist/*.exe
+        path: dist/*.exe
 
-    - name: Upload artifacts (Linux)
-      if: matrix.os == 'ubuntu-latest'
-      uses: actions/upload-artifact@v4
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install Python dependencies
+      run: pip install -r python/requirements.txt
+    
+    - name: Install Node dependencies
+      run: npm install
+    
+    - name: Build Linux
+      run: npm run dist:linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - uses: actions/upload-artifact@v4
       with:
         name: msk2k-linux
         path: |
           dist/*.AppImage
           dist/*.deb
 
-    - name: Release
-      if: startsWith(github.ref, 'refs/tags/')
+  release:
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          dist/*.dmg
-          dist/*.zip
-          dist/*.exe
-          dist/*.AppImage
-          dist/*.deb
+          artifacts/msk2k-macos/*
+          artifacts/msk2k-windows/*
+          artifacts/msk2k-linux/*
+        draft: false
+        prerelease: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
