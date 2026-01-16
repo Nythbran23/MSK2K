@@ -53,7 +53,6 @@
           "arch": ["arm64"]
         }
       ],
-      "icon": "build/icon.icns",
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "hardenedRuntime": true,
@@ -63,14 +62,13 @@
       "target": [
         "nsis",
         "portable"
-      ],
+      ]
     },
     "linux": {
       "target": [
         "AppImage",
         "deb"
       ],
-      "icon": "build/icon.png",
       "category": "Network"
     },
     "dmg": {
@@ -91,10 +89,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
-      "license": "LICENSE"
+      "createStartMenuShortcut": true
     }
   }
 }
