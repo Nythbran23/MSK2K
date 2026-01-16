@@ -7,147 +7,96 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-macos-arm:
-    runs-on: macos-14  # Apple Silicon runner
+  build-macos:
+    runs-on: macos-latest
     steps:
-    - uses: actions/checkout@v4
-    
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-    
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: Build Python runtime (Apple Silicon)
-      run: |
-        chmod +x build-scripts/build-python-runtime.sh
-        ./build-scripts/build-python-runtime.sh
-    
-    - name: Install Node dependencies
-      run: npm install
-    
-    - name: Build macOS (Apple Silicon)
-      run: npm run dist:mac
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    - uses: actions/upload-artifact@v4
-      with:
-        name: msk2k-macos-arm
-        path: |
-          dist/*.dmg
-          dist/*-arm64.zip
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Clean dist directory
+        run: rm -rf dist
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build
+        run: npm run dist:mac
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: msk2k-macos
+          path: dist/*.dmg
 
   build-windows:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
-    
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-    
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: Build Python runtime (Windows)
-      run: .\build-scripts\build-python-runtime.bat
-      shell: cmd
-    
-    - name: Install Node dependencies
-      run: npm install
-    
-    - name: Build Windows
-      run: npm run dist:win
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    - uses: actions/upload-artifact@v4
-      with:
-        name: msk2k-windows
-        path: dist/*.exe
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Clean dist directory
+        run: rm -rf dist
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build
+        run: npm run dist:win
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: msk2k-windows
+          path: dist/*.exe
 
   build-linux:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    
-    - uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-    
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    
-    - name: Build Python runtime (Linux)
-      run: |
-        chmod +x build-scripts/build-python-runtime.sh
-        ./build-scripts/build-python-runtime.sh
-    
-    - name: Install Node dependencies
-      run: npm install
-    
-    - name: Build Linux
-      run: npm run dist:linux
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    - uses: actions/upload-artifact@v4
-      with:
-        name: msk2k-linux
-        path: |
-          dist/*.AppImage
-          dist/*.deb
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Clean dist directory
+        run: rm -rf dist
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: Build
+        run: npm run dist:linux
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: msk2k-linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
 
   release:
-    needs: [build-macos-arm, build-windows, build-linux]
+    needs: [build-macos, build-windows, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-    - uses: actions/download-artifact@v4
-      with:
-        path: artifacts
-    
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          artifacts/msk2k-macos-intel/*
-          artifacts/msk2k-macos-arm/*
-          artifacts/msk2k-windows/*
-          artifacts/msk2k-linux/*
-        draft: false
-        prerelease: true
-        body: |
-          ## MSK2K v0.2.0-alpha - Zero Dependencies!
-          
-          **🎉 No Python installation required!** Everything is bundled.
-          
-          ### Downloads:
-          - **macOS Intel**: `MSK2K-x.x.x-x64.dmg`
-          - **macOS Apple Silicon**: `MSK2K-x.x.x-arm64.dmg`
-          - **Windows**: `MSK2K-Setup-x.x.x.exe`
-          - **Linux**: `MSK2K-x.x.x.AppImage` or `.deb`
-          
-          Just download and run - no setup required!
-          
-          ### What's New:
-          - ✅ Bundled Python runtime (no external dependencies)
-          - ✅ Works immediately on all platforms
-          - ✅ NOCALL default callsign
-          - ✅ Mid-position audio gains
-          - ✅ Improved error messages
-          
-          ### First Run:
-          1. Install/run MSK2K
-          2. Enter your callsign (replace NOCALL)
-          3. Select audio devices
-          4. Start operating!
-          
-          73 de GW4WND
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            msk2k-macos/*
+            msk2k-windows/*
+            msk2k-linux/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
