@@ -1,7 +1,7 @@
 {
   "name": "msk2k",
-  "version": "0.2.1",
-  "description": "MSK2K - Meteor Scatter Digital Mode (Zero Dependencies)",
+  "version": "0.3.0",
+  "description": "MSK2K - Meteor Scatter Digital Mode for Amateur Radio",
   "main": "main.js",
   "author": "Roger Banks (GW4WND) <roger@thedxshop.com>",
   "license": "MIT",
@@ -18,13 +18,15 @@
     "dist:win": "electron-builder --win",
     "dist:linux": "electron-builder --linux",
     "dist:all": "electron-builder -mwl",
-    "build:runtime": "bash build-scripts/build-python-runtime.sh",
     "postinstall": "electron-builder install-app-deps"
   },
-  "dependencies": {},
+  "dependencies": {
+    "node-fetch": "^2.6.7"
+  },
   "devDependencies": {
     "electron": "^28.1.0",
-    "electron-builder": "^24.9.1"
+    "electron-builder": "^24.9.1",
+    "fs-extra": "^11.2.0"
   },
   "build": {
     "appId": "com.thedxshop.msk2k",
@@ -33,27 +35,22 @@
     "files": [
       "main.js",
       "preload.js",
-      "!python/**/*",
-      "!build-scripts/**/*",
-      "!resources/**/*"
+      "renderer/**/*",
+      "python/**/*",
+      "!python/**/__pycache__",
+      "!python/**/*.pyc"
     ],
-    "extraResources": [
-      {
-        "from": "resources/python-runtime",
-        "to": "python-runtime",
-        "filter": ["**/*"]
-      }
-    ],
+    "afterPack": "./build-scripts/bundle-python.js",
     "mac": {
       "category": "public.app-category.utilities",
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": ["arm64"]
         },
         {
           "target": "zip",
-          "arch": ["x64", "arm64"]
+          "arch": ["arm64"]
         }
       ],
       "icon": "build/icon.icns",
@@ -95,7 +92,10 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "license": "LICENSE"
     }
   }
 }
