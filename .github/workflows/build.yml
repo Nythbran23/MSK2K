@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -25,12 +28,16 @@ jobs:
       
       - name: Build
         run: npm run dist:mac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: msk2k-macos
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*.zip
 
   build-windows:
     runs-on: windows-latest
@@ -43,13 +50,16 @@ jobs:
           node-version: '18'
       
       - name: Clean dist directory
-        run: rm -rf dist
+        run: Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+        shell: powershell
       
       - name: Install dependencies
         run: npm install
       
       - name: Build
         run: npm run dist:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -75,6 +85,8 @@ jobs:
       
       - name: Build
         run: npm run dist:linux
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
