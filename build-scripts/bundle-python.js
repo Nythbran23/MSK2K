@@ -32,7 +32,6 @@ async function bundleWindowsPython(appOutDir) {
   
   await fs.ensureDir(pythonDir);
 
-  // Download Python embeddable package
   const pythonVersion = '3.11.9';
   const pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-embed-amd64.zip`;
   const zipPath = path.join(resourcesDir, 'python-embed.zip');
@@ -46,13 +45,11 @@ async function bundleWindowsPython(appOutDir) {
   
   await fs.remove(zipPath);
 
-  // Enable pip by uncommenting 'import site' in pythonXX._pth
   const pthFile = path.join(pythonDir, 'python311._pth');
   let pthContent = await fs.readFile(pthFile, 'utf-8');
   pthContent = pthContent.replace('#import site', 'import site');
   await fs.writeFile(pthFile, pthContent);
 
-  // Download get-pip.py
   console.log('Installing pip...');
   const getPipPath = path.join(pythonDir, 'get-pip.py');
   execSync(`curl -L -o "${getPipPath}" https://bootstrap.pypa.io/get-pip.py`, 
@@ -61,7 +58,6 @@ async function bundleWindowsPython(appOutDir) {
   execSync(`"${path.join(pythonDir, 'python.exe')}" "${getPipPath}"`, 
     { stdio: 'inherit', cwd: pythonDir });
 
-  // Install dependencies
   console.log('Installing Python dependencies...');
   const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');
   
@@ -70,7 +66,6 @@ async function bundleWindowsPython(appOutDir) {
     { stdio: 'inherit', cwd: pythonDir }
   );
 
-  // Copy Python scripts
   console.log('Copying Python application files...');
   await fs.copy(
     path.join(__dirname, '..', 'python'),
@@ -90,12 +85,12 @@ async function bundleMacPython(appOutDir) {
   const pythonDir = path.join(resourcesDir, 'python');
   const extractDir = path.join(resourcesDir, 'python-extract');
   
-  // CRITICAL FIX: Remove any existing directories first
-  await fs.remove(pythonDir);
-  await fs.remove(extractDir);
+  // CRITICAL: Use shell rm -rf to force synchronous removal
+  console.log('Cleaning any existing directories...');
+  execSync(`rm -rf "${pythonDir}" "${extractDir}"`, { stdio: 'inherit' });
+  
   await fs.ensureDir(pythonDir);
 
-  // Download Python.org installer
   const pythonVersion = '3.11.9';
   const pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-macos11.pkg`;
   const pkgPath = path.join(resourcesDir, 'python-installer.pkg');
@@ -110,10 +105,8 @@ async function bundleMacPython(appOutDir) {
   execSync(`tar -xzf "${path.join(extractDir, 'Python_Framework.pkg', 'Payload')}" -C "${pythonDir}"`, 
     { stdio: 'inherit' });
   
-  await fs.remove(extractDir);
-  await fs.remove(pkgPath);
+  execSync(`rm -rf "${extractDir}" "${pkgPath}"`, { stdio: 'inherit' });
 
-  // Install dependencies
   console.log('Installing Python dependencies...');
   const pythonBin = path.join(pythonDir, 'Python.framework', 'Versions', '3.11', 'bin', 'python3');
   const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');
@@ -121,7 +114,6 @@ async function bundleMacPython(appOutDir) {
   execSync(`"${pythonBin}" -m pip install --upgrade pip`, { stdio: 'inherit' });
   execSync(`"${pythonBin}" -m pip install -r "${requirementsPath}"`, { stdio: 'inherit' });
 
-  // Copy Python scripts
   console.log('Copying Python application files...');
   await fs.copy(
     path.join(__dirname, '..', 'python'),
@@ -142,11 +134,9 @@ async function bundleLinuxPython(appOutDir) {
   
   await fs.ensureDir(pythonDir);
 
-  // Use system Python to create a portable venv
   console.log('Creating Python virtual environment...');
   execSync(`python3 -m venv "${pythonDir}"`, { stdio: 'inherit' });
 
-  // Install dependencies
   console.log('Installing Python dependencies...');
   const pipPath = path.join(pythonDir, 'bin', 'pip');
   const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');
@@ -154,7 +144,6 @@ async function bundleLinuxPython(appOutDir) {
   execSync(`"${pipPath}" install --upgrade pip`, { stdio: 'inherit' });
   execSync(`"${pipPath}" install -r "${requirementsPath}"`, { stdio: 'inherit' });
 
-  // Copy Python scripts
   console.log('Copying Python application files...');
   await fs.copy(
     path.join(__dirname, '..', 'python'),
