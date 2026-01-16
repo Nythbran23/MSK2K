@@ -101,7 +101,7 @@ function getPythonExe(runtimePath) {
   
   // Production: use bundled Python
   if (process.platform === 'win32') {
-    return path.join(runtimePath, 'python.exe');
+    return path.join(runtimePath, 'Scripts', 'python.exe');
   } else {
     return path.join(runtimePath, 'bin', 'python3');
   }
