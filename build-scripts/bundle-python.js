@@ -88,7 +88,11 @@ async function bundleMacPython(appOutDir) {
   
   const resourcesDir = path.join(appOutDir, '..', 'Resources');
   const pythonDir = path.join(resourcesDir, 'python');
+  const extractDir = path.join(resourcesDir, 'python-extract');
   
+  // CRITICAL FIX: Remove any existing directories first
+  await fs.remove(pythonDir);
+  await fs.remove(extractDir);
   await fs.ensureDir(pythonDir);
 
   // Download Python.org installer
@@ -100,7 +104,6 @@ async function bundleMacPython(appOutDir) {
   execSync(`curl -L -o "${pkgPath}" "${pythonUrl}"`, { stdio: 'inherit' });
   
   console.log('Extracting Python framework...');
-  const extractDir = path.join(resourcesDir, 'python-extract');
   await fs.ensureDir(extractDir);
   
   execSync(`pkgutil --expand "${pkgPath}" "${extractDir}"`, { stdio: 'inherit' });
