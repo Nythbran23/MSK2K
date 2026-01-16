@@ -397,3 +397,4 @@ app.on('before-quit', () => {
 process.on('uncaughtException', (error) => {
   console.error('Uncaught exception:', error);
 });
+// Force rebuild Fri 16 Jan 2026 14:02:10 GMT
