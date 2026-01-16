@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 MSK2K Audio QSO Test Harness (split RX/TX devices, UI controlled)
 
