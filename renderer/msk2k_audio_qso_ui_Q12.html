@@ -413,6 +413,7 @@ input[type="range"]:focus::-moz-range-thumb {
   </details>
 
 <script>
+const API_BASE = "http://127.0.0.1:8088";
 const el = (id) => document.getElementById(id);
 
 // Independent UTC clock - updates every 100ms for accuracy
@@ -443,13 +444,13 @@ function addItem(listEl, meta, msg, extra={}){
 function log(msg){ addItem(el('logList'), new Date().toLocaleTimeString(), msg); }
 
 async function post(path, body){
-  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+  const r = await fetch(API_BASE + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
   const j = await r.json().catch(()=>({}));
   if(!r.ok){ throw new Error(j.error || r.statusText); }
   return j;
 }
 async function get(path){
-  const r = await fetch(path);
+  const r = await fetch(API_BASE + path);
   const j = await r.json().catch(()=>({}));
   if(!r.ok){ throw new Error(j.error || r.statusText); }
   return j;
@@ -741,7 +742,7 @@ if(el('clearQsoDisplayBtn')) el('clearQsoDisplayBtn').onclick = (ev) => { ev.pre
 let ws;
 function connectWS(){
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket("ws://127.0.0.1:8088/ws");
   ws.onopen = () => { el('ws').classList.add('ok'); log('WS connected'); };
   ws.onclose = () => { el('ws').classList.remove('ok'); setTimeout(connectWS, 1000); };
   ws.onmessage = (ev) => {
