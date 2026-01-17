@@ -411,32 +411,56 @@ input[type="range"]:focus::-moz-range-thumb {
     <summary style="cursor:pointer;font-weight:bold;font-size:13px;">System Log <button id="clearLogBtn" style="float:right;font-size:10px;padding:2px 6px;">Clear</button></summary>
     <div class="list" id="logList" style="height:120px;margin-top:6px;"></div>
   </details>
-
 <script>
+/* =========================
+   Safe helpers (avoid null errors)
+   ========================= */
 const el = (id) => document.getElementById(id);
+const on = (id, evt, fn, opts) => { const n = el(id); if(n) n.addEventListener(evt, fn, opts); };
+const setText = (id, txt) => { const n = el(id); if(n) n.textContent = txt; };
+const setClass = (id, cls) => { const n = el(id); if(n) n.className = cls; };
+const addClass = (id, cls) => { const n = el(id); if(n) n.classList.add(cls); };
+const remClass = (id, cls) => { const n = el(id); if(n) n.classList.remove(cls); };
 
-// --- Backend base URL (works for file:// and http://) ---
+/* =========================
+   Backend URL (robust for file:// packaged)
+   Priority:
+     1) ?backend=...
+     2) http(s) => same origin
+     3) file:// => DEFAULT_BACKEND
+   ========================= */
 const DEFAULT_BACKEND = 'http://127.0.0.1:8088';
-const BACKEND_HTTP =
-  (location.protocol === 'http:' || location.protocol === 'https:')
-    ? `${location.protocol}//${location.host}`
-    : (new URLSearchParams(location.search).get('backend') || DEFAULT_BACKEND);
+const qs = new URLSearchParams(location.search);
+let BACKEND_HTTP = qs.get('backend');
 
-const BACKEND_WS = BACKEND_HTTP.replace(/^http/, 'ws') + '/ws';
+if(!BACKEND_HTTP){
+  if(location.protocol === 'http:' || location.protocol === 'https:'){
+    BACKEND_HTTP = `${location.protocol}//${location.host}`;
+  }else{
+    BACKEND_HTTP = DEFAULT_BACKEND;
+  }
+}
+BACKEND_HTTP = String(BACKEND_HTTP).replace(/\/+$/,''); // trim trailing /
+const BACKEND_WS = BACKEND_HTTP.replace(/^http/i,'ws') + '/ws';
 
-
-// Independent UTC clock - updates every 100ms for accuracy
+/* =========================
+   Clock
+   ========================= */
 function updateClock(){
   const now = new Date();
   const h = String(now.getUTCHours()).padStart(2,'0');
   const m = String(now.getUTCMinutes()).padStart(2,'0');
   const s = String(now.getUTCSeconds()).padStart(2,'0');
-  el('clock').textContent = `${h}:${m}:${s}`;
+  setText('clock', `${h}:${m}:${s}`);
 }
-setInterval(updateClock, 100);
+setInterval(updateClock, 250);
 updateClock();
 
+/* =========================
+   Logging
+   ========================= */
 function addItem(listEl, meta, msg, extra={}){
+  if(!listEl) return;
   const div = document.createElement('div');
   div.className = 'item';
   if(extra.type === 'tx') div.classList.add('tx');
@@ -449,9 +473,13 @@ function addItem(listEl, meta, msg, extra={}){
   listEl.appendChild(div);
   listEl.scrollTop = listEl.scrollHeight;
 }
+function log(msg){
+  addItem(el('logList'), new Date().toLocaleTimeString(), msg);
+}
 
-function log(msg){ addItem(el('logList'), new Date().toLocaleTimeString(), msg); }
-
+/* =========================
+   Fetch helpers (no popup spam)
+   ========================= */
 async function post(path, body){
   const r = await fetch(BACKEND_HTTP + path, {
     method:'POST',
@@ -469,11 +497,27 @@ async function get(path){
   return j;
 }
 
-let devices = [];
-let running = false;
+/* =========================
+   Wait for backend to be ready
+   (prevents "Failed to fetch" popup at launch)
+   ========================= */
+async function waitForBackendReady({timeoutMs=15000} = {}){
+  const start = Date.now();
+  while(Date.now() - start < timeoutMs){
+    try{
+      // cheap endpoint
+      await get('/api/levels');
+      return true;
+    }catch(_e){
+      await new Promise(res => setTimeout(res, 250));
+    }
+  }
+  return false;
+}
 
-
-// QSO log (client-side view; persisted on server in ADIF)
+/* =========================
+   QSO log
+   ========================= */
 let qsoLog = [];
 
 function fmtAdifDate(yyyymmdd){
@@ -497,7 +541,6 @@ function renderQsoLog(){
     body.appendChild(d);
     return;
   }
-  // Newest first, and show all (scroll for more)
   for(const q of qsoLog){
     const row = document.createElement('div');
     row.className = 'qsoRow';
@@ -526,11 +569,14 @@ async function loadQsoLog(){
     qsoLog = (j.qsos || []);
     renderQsoLog();
   }catch(e){
-    console.warn('Failed to load QSO log:', e);
+    log(`QSO log not available yet (${e.message})`);
   }
 }
 
-
+/* =========================
+   Devices
+   ========================= */
+let devices = [];
 function devLabel(d){
   const inCh = d.max_input_channels || 0;
   const outCh = d.max_output_channels || 0;
@@ -540,333 +586,148 @@ function devLabel(d){
 async function refreshDevices(){
   const j = await get('/api/devices');
   devices = j.devices || [];
-  const rxSel = el('rxDev'); const txSel = el('txDev');
-  rxSel.innerHTML = ''; txSel.innerHTML = '';
+  const rxSel = el('rxDev');
+  const txSel = el('txDev');
+  if(!rxSel || !txSel) return;
+
+  rxSel.innerHTML = '';
+  txSel.innerHTML = '';
   for(const d of devices){
     const opt1 = document.createElement('option'); opt1.value = d.index; opt1.textContent = devLabel(d);
     const opt2 = document.createElement('option'); opt2.value = d.index; opt2.textContent = devLabel(d);
-    rxSel.appendChild(opt1); txSel.appendChild(opt2);
+    rxSel.appendChild(opt1);
+    txSel.appendChild(opt2);
   }
+
+  // Auto pick BlackHole on mac if present
   const bh = devices.find(d => (d.name||'').toLowerCase().includes('blackhole') && (d.max_input_channels||0) > 0);
   const bhOut = devices.find(d => (d.name||'').toLowerCase().includes('blackhole') && (d.max_output_channels||0) > 0);
   if(bh) rxSel.value = String(bh.index);
   if(bhOut) txSel.value = String(bhOut.index);
+
   log('Audio devices refreshed');
 }
 
-el('refreshDevsBtn').onclick = () => refreshDevices().catch(e=>alert(e.message));
+on('refreshDevsBtn','click', () => refreshDevices().catch(e=>alert(e.message)));
 
-el('applyAudioBtn').onclick = async () => {
+/* =========================
+   Apply audio (kept as your behaviour, just safer)
+   ========================= */
+async function applyAudio(){
   const btn = el('applyAudioBtn');
-  const originalText = btn.textContent;
-  
+  const originalText = btn ? btn.textContent : 'Apply';
+
   try{
-    // Visual feedback
-    btn.disabled = true;
-    btn.textContent = 'Applying...';
-    
+    if(btn){
+      btn.disabled = true;
+      btn.textContent = 'Applying...';
+      btn.classList.remove('danger');
+    }
+
     const resp = await post('/api/audio', {
-      rx_device: parseInt(el('rxDev').value,10),
-      tx_device: parseInt(el('txDev').value,10),
-      rx_pick: parseInt(el('rxPick').value,10)-1,
-      tx_pick: parseInt(el('txPick').value,10)-1,
-      rx_gain: parseFloat(el('rxGain').value || '1.0'),
-      tx_gain: parseFloat(el('txGain').value || '0.6'),
-      rx_enable: el('rxEnable').checked,
-      tx_enable: el('txEnable').checked
+      rx_device: parseInt(el('rxDev')?.value ?? '0',10),
+      tx_device: parseInt(el('txDev')?.value ?? '0',10),
+      rx_pick: (parseInt(el('rxPick')?.value ?? '1',10)-1),
+      tx_pick: (parseInt(el('txPick')?.value ?? '1',10)-1),
+      rx_gain: parseFloat(el('rxGain')?.value || '1.0'),
+      tx_gain: parseFloat(el('txGain')?.value || '0.6'),
+      rx_enable: !!el('rxEnable')?.checked,
+      tx_enable: !!el('txEnable')?.checked
     });
-    
-    // Success feedback
-    btn.textContent = '✓ Applied';
-    btn.classList.add('active');
-    
+
+    if(btn){
+      btn.textContent = '✓ Applied';
+      btn.classList.add('active');
+    }
+
     if(resp.diagnostics){
       log(`Audio applied - RX: ${resp.diagnostics.rx}`);
       log(`Audio applied - TX: ${resp.diagnostics.tx}`);
-      if(resp.diagnostics.rx.includes('!=') || resp.diagnostics.tx.includes('!=')){
-        log('⚠️ Warning: Sample rate mismatch may cause errors');
+      if(String(resp.diagnostics.rx).includes('!=') || String(resp.diagnostics.tx).includes('!=')){
+        log('Warning: sample-rate mismatch may cause errors');
       }
     } else {
       log('Audio selection applied');
     }
-    
-    // Reset button after delay
-    setTimeout(() => {
-      btn.textContent = originalText;
-      btn.classList.remove('active');
-      btn.disabled = false;
-    }, 1500);
-    
-  }catch(e){ 
-    // Error feedback
-    btn.textContent = '✗ Failed';
-    btn.classList.remove('primary');
-    btn.classList.add('danger');
-    
-    log(`❌ Audio config failed: ${e.message}`);
-    alert(e.message);
-    
-    // Reset button after delay
-    setTimeout(() => {
-      btn.textContent = originalText;
-      btn.classList.remove('danger');
-      btn.classList.add('primary');
-      btn.disabled = false;
-    }, 2000);
-  }
-};
 
-el('diagBtn').onclick = async () => {
+    if(btn){
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.classList.remove('active');
+        btn.disabled = false;
+      }, 1200);
+    }
+  }catch(e){
+    if(btn){
+      btn.textContent = 'Failed';
+      btn.classList.add('danger');
+    }
+    log(`Audio config failed: ${e.message}`);
+    alert(e.message);
+
+    if(btn){
+      setTimeout(() => {
+        btn.textContent = originalText;
+        btn.classList.remove('danger');
+        btn.disabled = false;
+      }, 1500);
+    }
+    throw e;
+  }
+}
+
+on('applyAudioBtn','click', () => applyAudio());
+on('diagBtn','click', async () => {
   try{
     const diag = await get('/api/diagnostics');
     if(diag.diagnostics){
-      log(`📊 Diagnostics - RX: ${diag.diagnostics.rx}`);
-      log(`📊 Diagnostics - TX: ${diag.diagnostics.tx}`);
-      log(`📊 Diagnostics - Rate: ${diag.diagnostics.sample_rate}`);
-      
-      const hasIssues = diag.diagnostics.rx.includes('!=') || 
-                        diag.diagnostics.tx.includes('!=') ||
-                        !diag.diagnostics.rx.includes('OK') ||
-                        !diag.diagnostics.tx.includes('OK');
-      
-      if(hasIssues){
-        alert('⚠️ Configuration issues detected - check the log for details');
-      } else {
-        alert('✓ Audio configuration looks good!');
-      }
+      log(`Diagnostics - RX: ${diag.diagnostics.rx}`);
+      log(`Diagnostics - TX: ${diag.diagnostics.tx}`);
+      log(`Diagnostics - Rate: ${diag.diagnostics.sample_rate}`);
+      const hasIssues = String(diag.diagnostics.rx).includes('!=') ||
+                        String(diag.diagnostics.tx).includes('!=') ||
+                        !String(diag.diagnostics.rx).includes('OK') ||
+                        !String(diag.diagnostics.tx).includes('OK');
+      alert(hasIssues ? 'Configuration issues detected - check System Log' : 'Audio configuration looks good');
     }
-  }catch(e){ 
-    log(`❌ Diagnostics failed: ${e.message}`);
-    alert(e.message); 
+  }catch(e){
+    log(`Diagnostics failed: ${e.message}`);
+    alert(e.message);
   }
-};
+});
 
-async function startMode(mode, theirCall='', corr=null){
-  // Update buttons immediately for responsive feel
-  updateModeButtons(mode);
-  
-  if(running){
-    log('Already running - stopping first');
-    await post('/api/stop', {});
-    running = false;
-  }
-
-  // Clear Active QSO list when starting a new QSO/mode
-  el('activeList').innerHTML = '';
-
-  await el('applyAudioBtn').onclick(); // Apply audio
-
-  const payload = {
-    my_call: el('myCall').value.trim().toUpperCase(),
-    their_call: theirCall.trim().toUpperCase(),
-    mode: mode,
-    period_len: parseInt(el('periodLen').value,10),
-    tx_slot: el('txSlot').value,
-    auto_seq: true,
-    band_sel: el('bandSel') ? el('bandSel').value : '144',
-    band_custom: el('bandCustom') ? el('bandCustom').value.trim() : '',
-    freq_mhz: el('freqMHz') ? el('freqMHz').value.trim() : '',
-    tx_timeout_min: el('txTimeoutMin') ? parseInt(el('txTimeoutMin').value || '0',10) : 0,
-    tx_timeout_override: el('txTimeoutOverride') ? !!el('txTimeoutOverride').checked : false,
-    // If replying from a clicked decode, pass its correlation so server can latch report immediately
-    ...(mode === 'REPLY' && typeof corr === 'number' ? { initial_corr: corr } : {}),
-  };
-
-  await post('/api/start', payload);
-  running = true;
-  currentMode = mode;
-  log(`Started: ${mode}${theirCall ? ' → '+theirCall : ''}`);
+/* =========================
+   TX Timeout UI + push (safe)
+   ========================= */
+function syncTxTimeoutUI(){
+  const inp = el('txTimeoutMin');
+  const chk = el('txTimeoutOverride');
+  if(!inp || !chk) return;
+  inp.disabled = !!chk.checked;
+  inp.style.opacity = chk.checked ? '0.5' : '1';
 }
-
-let currentMode = '';
-
-function updateModeButtons(mode){
-  currentMode = mode;
-  el('listenBtn').classList.toggle('active', mode === 'LISTEN');
-  el('cqBtn').classList.toggle('active', mode === 'CQ');
-  // Only clear Call button if we're going to IDLE (not just switching modes)
-  if(mode === '' || mode === 'LISTEN' || mode === 'CQ') {
-    el('callBtn').classList.remove('active');
-  }
-  el('stopBtn').classList.toggle('active', mode !== '');
-}
-
-// Sync button state from server's qso_state
-function syncButtonsFromState(qso_state){
-  if(qso_state === 'IDLE') {
-    updateModeButtons('');
-  } else if(qso_state === 'LISTEN') {
-    updateModeButtons('LISTEN');
-  } else if(qso_state === 'CALLING_CQ') {
-    updateModeButtons('CQ');
-  }
-  // Don't change buttons during IN_QSO/REPORTS - keep current mode shown
-}
-
-async function stopMode(){
-  await post('/api/stop', {});
-  running = false;
-  updateModeButtons('');
-  el('state').textContent = 'IDLE';
-  el('nextTx').textContent = '(none)';
-  log('Stopped');
-}
-
-el('listenBtn').onclick = async () => {
+let _txTimeoutTimer = null;
+async function pushTxTimeout(){
+  const inp = el('txTimeoutMin');
+  const chk = el('txTimeoutOverride');
+  if(!inp || !chk) return;
   try{
-    if(currentMode === 'LISTEN'){
-      await stopMode();
-    } else {
-      await startMode('LISTEN');
-    }
-  }catch(e){ alert(e.message); }
-};
-
-el('cqBtn').onclick = async () => {
-  try{
-    if(currentMode === 'CQ'){
-      await stopMode();
-    } else {
-      await startMode('CQ');
-    }
-  }catch(e){ alert(e.message); }
-};
-
-el('callBtn').onclick = async () => {
-  try{
-    const their = el('theirCall').value.trim().toUpperCase();
-    if(!their){ alert('Enter their callsign first'); return; }
-    await startMode('CALL', their);
-    el('callBtn').classList.add('active');
-  }catch(e){ alert(e.message); }
-};
-
-el('stopBtn').onclick = async () => {
-  try{
-    await stopMode();
-  }catch(e){ alert(e.message); }
-};
-
-el('clearActiveBtn').onclick = () => el('activeList').innerHTML='';
-el('clearPublicBtn').onclick = () => { el('publicList').innerHTML=''; el('callBtn').classList.remove('active'); };
-el('clearLogBtn').onclick = () => el('logList').innerHTML='';
-if(el('clearQsoDisplayBtn')) el('clearQsoDisplayBtn').onclick = (ev) => { ev.preventDefault(); qsoLog = []; renderQsoLog(); };
-
-let ws;
-function connectWS(){
-  ws = new WebSocket(BACKEND_WS);
-  ws.onopen = () => { el('ws').classList.add('ok'); log('WS connected'); };
-  ws.onclose = () => { el('ws').classList.remove('ok'); setTimeout(connectWS, 1000); };
-  ws.onmessage = (ev) => {
-    const m = JSON.parse(ev.data);
-    if(m.type === 'tick'){
-      el('period').textContent = m.period_label;
-      el('rxTx').textContent = m.rx_tx;
-      el('rxTx').className = 'pill mono ' + (m.rx_tx === 'TX' ? 'tx-active' : 'rx-active');
-      el('state').textContent = m.qso_state;
-      el('state').classList.toggle('active', m.qso_state !== 'IDLE');
-      el('nextTx').textContent = m.next_tx || '(none)';
-      // Sync button states from server
-      syncButtonsFromState(m.qso_state);
-      // Sync their_call - set if provided, clear if empty and we're IDLE/LISTEN
-      if(m.their_call) {
-        el('theirCall').value = m.their_call;
-      } else if(m.qso_state === 'IDLE' || m.qso_state === 'LISTEN') {
-        el('theirCall').value = '';
-      }
-    } else if(m.type === 'rx'){
-      const fmtLabel = m.format === 2 ? ' [FMT2]' : '';
-      const corr = m.snr;
-      const quality = corr != null ? `Q=${Math.round(corr * 100)}%` : '';
-      const meta = `${m.ts}  ${quality}  ${m.method ?? ''}${fmtLabel}`.trim();
-      if(m.visibility === 'public'){
-        const call = (m.from || '').trim();
-        const click = call ? async () => {
-          // Auto-start answering this CQ
-          try{
-            // Immediately show our planned response in Active QSO FIRST
-            const myCall = el('myCall').value.trim().toUpperCase();
-            const ourResponse = `${call} de ${myCall} (pending...)`;
-            const nowTs = new Date().toISOString().substr(11,8) + 'Z';
-            addItem(el('activeList'), `${nowTs} → TX queued`, ourResponse, {type:'tx'});
-            
-            el('theirCall').value = call;
-            await startMode("REPLY", call, corr);
-            log(`Answering CQ from ${call}`);
-          }catch(e){ alert(e.message); }
-        } : null;
-        addItem(el('publicList'), meta, m.text, {click, type:'rx'});
-        // Light up Call button when there are CQs to answer
-        if(call) el('callBtn').classList.add('active');
-      } else {
-        addItem(el('activeList'), meta, m.text, {type:'rx'});
-      }
-    } else if(m.type === 'tx'){
-      const msgType = m.msg_type ? ` [${m.msg_type}]` : '';
-      addItem(el('logList'), m.ts, `TX${msgType}: ${m.text}`, {type:'tx'});
-      // Also show TX in Active QSO for visibility
-      addItem(el('activeList'), `${m.ts} TX${msgType}`, m.text, {type:'tx'});
-    } else if(m.type === 'qso_complete'){
-      // QSO finished
-      addItem(el('activeList'), `${m.ts} ✓ COMPLETE`, `QSO with ${m.partner} finished`);
-      log(`✓ QSO with ${m.partner} complete`);
-      if(m.qso){ addQsoToTop(m.qso); }
-      // Clear the callsign box
-      el('theirCall').value = '';
-      // Clear Active QSO after 3 seconds
-      setTimeout(() => { el('activeList').innerHTML = ''; }, 3000);
-    } else if(m.type === 'info'){
-      log(m.message);
-    }
-  };
-}
-
-// Settings persistence
-const SETTINGS_KEY = 'msk2k_settings';
-
-function saveSettings() {
-  const settings = {
-    txSlot: el('txSlot').value,
-    rxPick: el('rxPick').value,
-    txPick: el('txPick').value,
-    rxGain: el('rxGain').value,
-    txGain: el('txGain').value,
-    rxAuto: el('rxAuto') ? !!el('rxAuto').checked : false,
-    myCall: el('myCall').value,
-    periodLen: el('periodLen').value,
-    bandSel: el('bandSel') ? el('bandSel').value : '144',
-    bandCustom: el('bandCustom') ? el('bandCustom').value : '',
-    freqMHz: el('freqMHz') ? el('freqMHz').value : '',
-    txTimeoutMin: el('txTimeoutMin') ? el('txTimeoutMin').value : '120',
-    txTimeoutOverride: el('txTimeoutOverride') ? !!el('txTimeoutOverride').checked : false
-  };
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-}
-
-function loadSettings() {
-  try {
-    const saved = localStorage.getItem(SETTINGS_KEY);
-    if (saved) {
-      const settings = JSON.parse(saved);
-      if (settings.txSlot) el('txSlot').value = settings.txSlot;
-      if (settings.rxPick) el('rxPick').value = settings.rxPick;
-      if (settings.txPick) el('txPick').value = settings.txPick;
-      if (settings.rxGain) el('rxGain').value = settings.rxGain;
-      if (settings.txGain) el('txGain').value = settings.txGain;
-      if (el('rxAuto') && settings.rxAuto != null) el('rxAuto').checked = !!settings.rxAuto;
-      if (settings.myCall) el('myCall').value = settings.myCall;
-      if (settings.periodLen) el('periodLen').value = settings.periodLen;
-      if (el('bandSel') && settings.bandSel) el('bandSel').value = settings.bandSel;
-      if (el('bandCustom') && settings.bandCustom != null) el('bandCustom').value = settings.bandCustom;
-      if (el('freqMHz') && settings.freqMHz != null) el('freqMHz').value = settings.freqMHz;
-      if (el('txTimeoutMin') && settings.txTimeoutMin != null) el('txTimeoutMin').value = settings.txTimeoutMin;
-      if (el('txTimeoutOverride') && settings.txTimeoutOverride != null) el('txTimeoutOverride').checked = !!settings.txTimeoutOverride;
-    }
-  } catch (e) {
-    console.warn('Failed to load settings:', e);
+    await post('/api/tx_timeout', {
+      minutes: parseInt(inp.value || '0', 10),
+      override: !!chk.checked
+    });
+  }catch(_e){
+    // ignore transient errors
   }
 }
+function schedulePushTxTimeout(){
+  if(_txTimeoutTimer) clearTimeout(_txTimeoutTimer);
+  _txTimeoutTimer = setTimeout(pushTxTimeout, 150);
+}
 
+/* =========================
+   Band custom visibility
+   ========================= */
 function syncBandCustomVisibility(){
   const sel = el('bandSel');
   const custom = el('bandCustom');
@@ -876,49 +737,241 @@ function syncBandCustomVisibility(){
   if(!isCustom) custom.value = '';
 }
 
-function syncTxTimeoutUI(){
-  const inp = el('txTimeoutMin');
-  const chk = el('txTimeoutOverride');
-  if(!inp || !chk) return;
-  inp.disabled = !!chk.checked;
-  inp.style.opacity = chk.checked ? '0.5' : '1';
+/* =========================
+   Settings persistence (safe)
+   ========================= */
+const SETTINGS_KEY = 'msk2k_settings';
+
+function saveSettings(){
+  const settings = {
+    txSlot: el('txSlot')?.value,
+    rxPick: el('rxPick')?.value,
+    txPick: el('txPick')?.value,
+    rxGain: el('rxGain')?.value,
+    txGain: el('txGain')?.value,
+    myCall: el('myCall')?.value,
+    periodLen: el('periodLen')?.value,
+    bandSel: el('bandSel')?.value,
+    bandCustom: el('bandCustom')?.value ?? '',
+    freqMHz: el('freqMHz')?.value ?? '',
+    txTimeoutMin: el('txTimeoutMin')?.value ?? '120',
+    txTimeoutOverride: !!el('txTimeoutOverride')?.checked
+  };
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
 
-let _txTimeoutTimer = null;
-async function pushTxTimeout(){
-  if(!el('txTimeoutMin') || !el('txTimeoutOverride')) return;
+function loadSettings(){
   try{
-    await post('/api/tx_timeout', {
-      minutes: parseInt(el('txTimeoutMin').value || '0', 10),
-      override: !!el('txTimeoutOverride').checked
-    });
-  }catch(_e){
-    // ignore transient errors
+    const saved = localStorage.getItem(SETTINGS_KEY);
+    if(!saved) return;
+    const s = JSON.parse(saved);
+
+    if(el('txSlot') && s.txSlot) el('txSlot').value = s.txSlot;
+    if(el('rxPick') && s.rxPick) el('rxPick').value = s.rxPick;
+    if(el('txPick') && s.txPick) el('txPick').value = s.txPick;
+    if(el('rxGain') && s.rxGain) el('rxGain').value = s.rxGain;
+    if(el('txGain') && s.txGain) el('txGain').value = s.txGain;
+    if(el('myCall') && s.myCall) el('myCall').value = s.myCall;
+    if(el('periodLen') && s.periodLen) el('periodLen').value = s.periodLen;
+
+    if(el('bandSel') && s.bandSel) el('bandSel').value = s.bandSel;
+    if(el('bandCustom') && s.bandCustom != null) el('bandCustom').value = s.bandCustom;
+    if(el('freqMHz') && s.freqMHz != null) el('freqMHz').value = s.freqMHz;
+
+    if(el('txTimeoutMin') && s.txTimeoutMin != null) el('txTimeoutMin').value = s.txTimeoutMin;
+    if(el('txTimeoutOverride') && s.txTimeoutOverride != null) el('txTimeoutOverride').checked = !!s.txTimeoutOverride;
+  }catch(e){
+    console.warn('Failed to load settings', e);
   }
 }
 
-function schedulePushTxTimeout(){
-  if(_txTimeoutTimer) clearTimeout(_txTimeoutTimer);
-  _txTimeoutTimer = setTimeout(()=>{ pushTxTimeout(); }, 150);
-}
-
-// Save settings when changed
-['txSlot', 'rxPick', 'txPick', 'rxGain', 'txGain', 'myCall', 'periodLen', 'bandSel', 'bandCustom', 'freqMHz', 'txTimeoutMin', 'txTimeoutOverride'].forEach(id => {
-  el(id).addEventListener('change', saveSettings);
-  el(id).addEventListener('input', saveSettings);
+/* Wire settings events safely */
+[
+  'txSlot','rxPick','txPick','rxGain','txGain','myCall','periodLen',
+  'bandSel','bandCustom','freqMHz','txTimeoutMin','txTimeoutOverride'
+].forEach(id => {
+  on(id,'change', saveSettings);
+  on(id,'input',  saveSettings);
 });
+on('bandSel','change', () => { syncBandCustomVisibility(); saveSettings(); });
+on('txTimeoutOverride','change', () => { syncTxTimeoutUI(); schedulePushTxTimeout(); saveSettings(); });
+on('txTimeoutMin','change', () => { schedulePushTxTimeout(); saveSettings(); });
+on('txTimeoutMin','input',  () => { schedulePushTxTimeout(); saveSettings(); });
 
-// Band custom + TX timeout UI behaviour
-if(el('bandSel')) el('bandSel').addEventListener('change', () => { syncBandCustomVisibility(); saveSettings(); });
-if(el('txTimeoutOverride')) el('txTimeoutOverride').addEventListener('change', () => { syncTxTimeoutUI(); schedulePushTxTimeout(); saveSettings(); });
-if(el('txTimeoutMin')){
-  el('txTimeoutMin').addEventListener('change', () => { schedulePushTxTimeout(); saveSettings(); });
-  el('txTimeoutMin').addEventListener('input', () => { schedulePushTxTimeout(); saveSettings(); });
+/* =========================
+   Mode control
+   ========================= */
+let running = false;
+let currentMode = '';
+
+function updateModeButtons(mode){
+  currentMode = mode;
+  el('listenBtn')?.classList.toggle('active', mode === 'LISTEN');
+  el('cqBtn')?.classList.toggle('active', mode === 'CQ');
+  if(mode === '' || mode === 'LISTEN' || mode === 'CQ'){
+    el('callBtn')?.classList.remove('active');
+  }
+  el('stopBtn')?.classList.toggle('active', mode !== '');
 }
 
+function syncButtonsFromState(qso_state){
+  if(qso_state === 'IDLE') updateModeButtons('');
+  else if(qso_state === 'LISTEN') updateModeButtons('LISTEN');
+  else if(qso_state === 'CALLING_CQ') updateModeButtons('CQ');
+}
 
+async function startMode(mode, theirCall='', corr=null){
+  updateModeButtons(mode);
+
+  if(running){
+    log('Already running - stopping first');
+    await post('/api/stop', {});
+    running = false;
+  }
+
+  if(el('activeList')) el('activeList').innerHTML = '';
+
+  // Apply audio, but don't hard-fail launch if the user hasn't chosen devices yet
+  try { await applyAudio(); } catch(_e) {}
+
+  const payload = {
+    my_call: (el('myCall')?.value || 'NOCALL').trim().toUpperCase(),
+    their_call: (theirCall || '').trim().toUpperCase(),
+    mode,
+    period_len: parseInt(el('periodLen')?.value || '15',10),
+    tx_slot: el('txSlot')?.value || 'A',
+    auto_seq: true,
+    band_sel: el('bandSel')?.value || '144',
+    band_custom: (el('bandCustom')?.value || '').trim(),
+    freq_mhz: (el('freqMHz')?.value || '').trim(),
+    tx_timeout_min: parseInt(el('txTimeoutMin')?.value || '0',10),
+    tx_timeout_override: !!el('txTimeoutOverride')?.checked,
+    ...(mode === 'REPLY' && typeof corr === 'number' ? { initial_corr: corr } : {})
+  };
+
+  await post('/api/start', payload);
+  running = true;
+  currentMode = mode;
+  log(`Started: ${mode}${theirCall ? ' → '+theirCall : ''}`);
+}
+
+async function stopMode(){
+  await post('/api/stop', {});
+  running = false;
+  updateModeButtons('');
+  setText('state','IDLE');
+  setText('nextTx','(none)');
+  log('Stopped');
+}
+
+on('listenBtn','click', async () => {
+  try{
+    if(currentMode === 'LISTEN') await stopMode();
+    else await startMode('LISTEN');
+  }catch(e){ alert(e.message); }
+});
+on('cqBtn','click', async () => {
+  try{
+    if(currentMode === 'CQ') await stopMode();
+    else await startMode('CQ');
+  }catch(e){ alert(e.message); }
+});
+on('callBtn','click', async () => {
+  try{
+    const their = (el('theirCall')?.value || '').trim().toUpperCase();
+    if(!their){ alert('Enter their callsign first'); return; }
+    await startMode('CALL', their);
+    el('callBtn')?.classList.add('active');
+  }catch(e){ alert(e.message); }
+});
+on('stopBtn','click', async () => { try{ await stopMode(); }catch(e){ alert(e.message); } });
+
+on('clearActiveBtn','click', () => { if(el('activeList')) el('activeList').innerHTML=''; });
+on('clearPublicBtn','click', () => { if(el('publicList')) el('publicList').innerHTML=''; el('callBtn')?.classList.remove('active'); });
+on('clearLogBtn','click', () => { if(el('logList')) el('logList').innerHTML=''; });
+on('clearQsoDisplayBtn','click', (ev) => { ev.preventDefault(); qsoLog = []; renderQsoLog(); });
+
+/* =========================
+   WebSocket
+   ========================= */
+let ws = null;
+function connectWS(){
+  try{ ws?.close(); }catch(_e){}
+  ws = new WebSocket(BACKEND_WS);
+
+  ws.onopen = () => { addClass('ws','ok'); log('WS connected'); };
+  ws.onclose = () => { remClass('ws','ok'); setTimeout(connectWS, 750); };
+  ws.onerror = () => { /* avoid noisy popups */ };
+
+  ws.onmessage = (ev) => {
+    let m;
+    try{ m = JSON.parse(ev.data); }catch(_e){ return; }
+
+    if(m.type === 'tick'){
+      setText('period', m.period_label);
+      setText('rxTx', m.rx_tx);
+      setClass('rxTx', 'pill mono ' + (m.rx_tx === 'TX' ? 'tx-active' : 'rx-active'));
+      setText('state', m.qso_state);
+      el('state')?.classList.toggle('active', m.qso_state !== 'IDLE');
+      setText('nextTx', m.next_tx || '(none)');
+      syncButtonsFromState(m.qso_state);
+
+      if(el('theirCall')){
+        if(m.their_call) el('theirCall').value = m.their_call;
+        else if(m.qso_state === 'IDLE' || m.qso_state === 'LISTEN') el('theirCall').value = '';
+      }
+    }
+    else if(m.type === 'rx'){
+      const fmtLabel = m.format === 2 ? ' [FMT2]' : '';
+      const corr = m.snr;
+      const quality = corr != null ? `Q=${Math.round(corr * 100)}%` : '';
+      const meta = `${m.ts}  ${quality}  ${m.method ?? ''}${fmtLabel}`.trim();
+
+      if(m.visibility === 'public'){
+        const call = (m.from || '').trim();
+        const click = call ? async () => {
+          try{
+            const myCall = (el('myCall')?.value || 'NOCALL').trim().toUpperCase();
+            const ourResponse = `${call} de ${myCall} (pending...)`;
+            const nowTs = new Date().toISOString().substr(11,8) + 'Z';
+            addItem(el('activeList'), `${nowTs} → TX queued`, ourResponse, {type:'tx'});
+
+            if(el('theirCall')) el('theirCall').value = call;
+            await startMode('REPLY', call, corr);
+            log(`Answering CQ from ${call}`);
+          }catch(e){ alert(e.message); }
+        } : null;
+
+        addItem(el('publicList'), meta, m.text, {click, type:'rx'});
+        if(call) el('callBtn')?.classList.add('active');
+      }else{
+        addItem(el('activeList'), meta, m.text, {type:'rx'});
+      }
+    }
+    else if(m.type === 'tx'){
+      const msgType = m.msg_type ? ` [${m.msg_type}]` : '';
+      addItem(el('logList'), m.ts, `TX${msgType}: ${m.text}`, {type:'tx'});
+      addItem(el('activeList'), `${m.ts} TX${msgType}`, m.text, {type:'tx'});
+    }
+    else if(m.type === 'qso_complete'){
+      addItem(el('activeList'), `${m.ts} COMPLETE`, `QSO with ${m.partner} finished`);
+      log(`QSO with ${m.partner} complete`);
+      if(m.qso) addQsoToTop(m.qso);
+      if(el('theirCall')) el('theirCall').value = '';
+      setTimeout(() => { if(el('activeList')) el('activeList').innerHTML=''; }, 3000);
+    }
+    else if(m.type === 'info'){
+      log(m.message);
+    }
+  };
+}
+
+/* =========================
+   Audio levels (unchanged behaviour)
+   ========================= */
 function buildLedBar(containerId, segments=28){
   const c = el(containerId);
+  if(!c) return;
   c.innerHTML = '';
   for(let i=0;i<segments;i++){
     const s = document.createElement('div');
@@ -926,15 +979,18 @@ function buildLedBar(containerId, segments=28){
     c.appendChild(s);
   }
 }
-function setLedBar(containerId, dbfs, clip, isTx=false){
+
+function setLedBar(containerId, dbfs, clip){
   const c = el(containerId);
+  if(!c) return;
   const segs = Array.from(c.children);
+
   if(dbfs == null || isNaN(dbfs)){
     segs.forEach(s=>s.classList.remove('on'));
     c.classList.toggle('clip', false);
     return;
   }
-  // Map -60..0 dBFS => 0..1
+
   const v = Math.max(0, Math.min(1, (dbfs + 60) / 60));
   const onCount = Math.round(v * segs.length);
   segs.forEach((s, i)=> s.classList.toggle('on', i < onCount));
@@ -942,62 +998,49 @@ function setLedBar(containerId, dbfs, clip, isTx=false){
 }
 
 function syncGainLabels(){
-  if(el('rxGainVal')) el('rxGainVal').textContent = Number(el('rxGain').value).toFixed(2);
-  if(el('txGainVal')) el('txGainVal').textContent = Number(el('txGain').value).toFixed(2);
+  if(el('rxGainVal') && el('rxGain')) el('rxGainVal').textContent = Number(el('rxGain').value).toFixed(2);
+  if(el('txGainVal') && el('txGain')) el('txGainVal').textContent = Number(el('txGain').value).toFixed(2);
 }
 
-// Target "sweet spot" for RMS level (dBFS). This is a guidance band, not a hard rule.
 const TARGET_LO_DBFS = -26;
 const TARGET_HI_DBFS = -14;
-const AUTO_TARGET_DBFS = -20;
 
 function dbfsToPct(dbfs){
   const v = Math.max(0, Math.min(1, (dbfs + 60) / 60));
   return v * 100;
 }
-
 function setTargetMarks(){
   const lo = dbfsToPct(TARGET_LO_DBFS);
   const hi = dbfsToPct(TARGET_HI_DBFS);
-  const set = (id, leftPct) => {
-    const n = el(id);
-    if(n) n.style.left = `calc(${leftPct}% - 1px)`;
-  };
-  set('rxTickLo', lo);
-  set('rxTickHi', hi);
-  set('txTickLo', lo);
-  set('txTickHi', hi);
-  const band = (id) => {
+
+  const setTick = (id, leftPct) => { const n = el(id); if(n) n.style.left = `calc(${leftPct}% - 1px)`; };
+  setTick('rxTickLo', lo); setTick('rxTickHi', hi);
+  setTick('txTickLo', lo); setTick('txTickHi', hi);
+
+  const setBand = (id) => {
     const n = el(id);
     if(n){
       n.style.left = `${lo}%`;
       n.style.width = `${Math.max(0, hi-lo)}%`;
     }
   };
-  band('rxTargetBand');
-  band('txTargetBand');
-  const lbl = el('rxTargetLbl');
-  if(lbl) lbl.textContent = `${AUTO_TARGET_DBFS} dBFS`;
+  setBand('rxTargetBand');
+  setBand('txTargetBand');
 }
 
 let _gainTimer = null;
 async function pushGains(){
-  // Apply gains immediately without touching device/channel selection.
   try{
     await post('/api/gain', {
-      rx_gain: parseFloat(el('rxGain').value || '1.0'),
-      tx_gain: parseFloat(el('txGain').value || '0.6'),
-      auto_rx: !!el('rxAuto')?.checked,
-      auto_target_dbfs: AUTO_TARGET_DBFS,
+      rx_gain: parseFloat(el('rxGain')?.value || '1.0'),
+      tx_gain: parseFloat(el('txGain')?.value || '0.6'),
+      auto_rx: false
     });
-  }catch(_e){
-    // ignore transient errors during startup
-  }
+  }catch(_e){}
 }
-
 function schedulePushGains(){
   if(_gainTimer) clearTimeout(_gainTimer);
-  _gainTimer = setTimeout(()=>{ pushGains(); }, 120);
+  _gainTimer = setTimeout(pushGains, 120);
 }
 
 async function pollLevels(){
@@ -1006,48 +1049,59 @@ async function pollLevels(){
     if(j && j.ok){
       const rx = j.rx || {};
       const tx = j.tx || {};
-      const rxRms = rx.rms_dbfs;
-      const txRms = tx.rms_dbfs;
 
-      setLedBar('rxBar', rxRms, rx.clip, false);
-      setLedBar('txBar', txRms, tx.clip, true);
+      setLedBar('rxBar', rx.rms_dbfs, rx.clip);
+      setLedBar('txBar', tx.rms_dbfs, tx.clip);
 
-      el('rxDb').textContent = (rxRms==null ? '--.- dBFS' : `${rxRms.toFixed(1)} dBFS`);
-      el('txDb').textContent = (txRms==null ? '--.- dBFS' : `${txRms.toFixed(1)} dBFS`);
+      setText('rxDb', (rx.rms_dbfs==null ? '--.- dBFS' : `${rx.rms_dbfs.toFixed(1)} dBFS`));
+      setText('txDb', (tx.rms_dbfs==null ? '--.- dBFS' : `${tx.rms_dbfs.toFixed(1)} dBFS`));
 
-      el('rxClip').textContent = rx.clip ? 'CLIP' : '';
-      el('txClip').textContent = tx.clip ? 'CLIP' : '';
+      setText('rxClip', rx.clip ? 'CLIP' : '');
+      setText('txClip', tx.clip ? 'CLIP' : '');
     }
-  }catch(_e){
-    // ignore while starting up
-  }
+  }catch(_e){}
 }
 
 buildLedBar('rxBar', 28);
 buildLedBar('txBar', 28);
 setTargetMarks();
 syncGainLabels();
-el('rxGain').addEventListener('input', () => { syncGainLabels(); saveSettings(); schedulePushGains(); });
-el('txGain').addEventListener('input', () => { syncGainLabels(); saveSettings(); schedulePushGains(); });
-if(el('rxAuto')) el('rxAuto').addEventListener('change', () => { saveSettings(); schedulePushGains(); });
+on('rxGain','input', () => { syncGainLabels(); saveSettings(); schedulePushGains(); });
+on('txGain','input', () => { syncGainLabels(); saveSettings(); schedulePushGains(); });
 
-// poll faster than WS tick so the bar feels "alive"
 setInterval(pollLevels, 250);
-pollLevels();
 
+/* =========================
+   Init (no popup on launch)
+   ========================= */
 (async function init(){
   loadSettings();
   syncBandCustomVisibility();
   syncTxTimeoutUI();
-  schedulePushTxTimeout();
   setTargetMarks();
   syncGainLabels();
+
+  log(`UI loaded (${location.protocol})`);
+  log(`Backend: ${BACKEND_HTTP}`);
+
+  const ok = await waitForBackendReady({timeoutMs: 20000});
+  if(!ok){
+    // No popup: just log + keep retrying silently via WS reconnect and user buttons
+    log('Backend not ready yet (will keep retrying)');
+  }else{
+    log('Backend ready');
+    try{ await refreshDevices(); }catch(e){ log(`Device list failed: ${e.message}`); }
+    try{ await loadQsoLog(); }catch(_e){}
+    schedulePushGains();
+    schedulePushTxTimeout();
+  }
+
   connectWS();
-  await refreshDevices();
-  await loadQsoLog();
-  // push initial gains/auto setting once UI is live
-  schedulePushGains();
-})().catch(e=>alert(e.message));
+  pollLevels();
+})().catch(e=>{
+  // last resort: log only, avoid modal popup on launch
+  log(`Init error: ${e.message}`);
+});
 </script>
 </body>
 </html>
