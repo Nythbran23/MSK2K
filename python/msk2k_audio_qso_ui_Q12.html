@@ -415,6 +415,16 @@ input[type="range"]:focus::-moz-range-thumb {
 <script>
 const el = (id) => document.getElementById(id);
 
+// --- Backend base URL (works for file:// and http://) ---
+const DEFAULT_BACKEND = 'http://127.0.0.1:8088';
+const BACKEND_HTTP =
+  (location.protocol === 'http:' || location.protocol === 'https:')
+    ? `${location.protocol}//${location.host}`
+    : (new URLSearchParams(location.search).get('backend') || DEFAULT_BACKEND);
+
+const BACKEND_WS = BACKEND_HTTP.replace(/^http/, 'ws') + '/ws';
+
+
 // Independent UTC clock - updates every 100ms for accuracy
 function updateClock(){
   const now = new Date();
@@ -443,13 +453,17 @@ function addItem(listEl, meta, msg, extra={}){
 function log(msg){ addItem(el('logList'), new Date().toLocaleTimeString(), msg); }
 
 async function post(path, body){
-  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+  const r = await fetch(BACKEND_HTTP + path, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body||{})
+  });
   const j = await r.json().catch(()=>({}));
   if(!r.ok){ throw new Error(j.error || r.statusText); }
   return j;
 }
 async function get(path){
-  const r = await fetch(path);
+  const r = await fetch(BACKEND_HTTP + path, { cache: 'no-store' });
   const j = await r.json().catch(()=>({}));
   if(!r.ok){ throw new Error(j.error || r.statusText); }
   return j;
@@ -740,8 +754,7 @@ if(el('clearQsoDisplayBtn')) el('clearQsoDisplayBtn').onclick = (ev) => { ev.pre
 
 let ws;
 function connectWS(){
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(BACKEND_WS);
   ws.onopen = () => { el('ws').classList.add('ok'); log('WS connected'); };
   ws.onclose = () => { el('ws').classList.remove('ok'); setTimeout(connectWS, 1000); };
   ws.onmessage = (ev) => {
