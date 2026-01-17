@@ -18,9 +18,6 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'msk2k_audio_qso_ui_Q12.html'));
   
-  // Open DevTools
-  mainWindow.webContents.openDevTools();
-  
   // Wait a bit for window to be ready, then start Python
   setTimeout(() => {
     startPythonBackend();
@@ -29,8 +26,14 @@ function createWindow() {
 
 function logToConsole(msg) {
   console.log(msg);
-  if (mainWindow && mainWindow.webContents) {
-    mainWindow.webContents.executeJavaScript(`console.log(${JSON.stringify(msg)})`);
+  // Guard against destroyed window during exit
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+    try {
+      mainWindow.webContents.executeJavaScript(`console.log(${JSON.stringify(msg)})`);
+    } catch (e) {
+      // Window may have been destroyed between the check and execution
+      // Silent fail is OK here - message is already in main console.log
+    }
   }
 }
 
