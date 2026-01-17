@@ -464,10 +464,27 @@ async function refreshDevices(){
     rxSel.appendChild(opt1); txSel.appendChild(opt2);
   }
   // Auto-pick BlackHole if present (mac). On Windows, do nothing special.
+  // Prefer last-saved selections (if present), otherwise fall back to BlackHole on mac.
+  const saved = (window._msk2k_saved_settings || {});
+  const hasOpt = (sel, val) => !!sel.querySelector(`option[value="${val}"]`);
+
+  // Default/fallback: BlackHole if available
   const bh = devices.find(d => (d.name||'').toLowerCase().includes('blackhole') && (d.max_input_channels||0) > 0);
   const bhOut = devices.find(d => (d.name||'').toLowerCase().includes('blackhole') && (d.max_output_channels||0) > 0);
-  if(bh) rxSel.value = String(bh.index);
-  if(bhOut) txSel.value = String(bhOut.index);
+
+  const savedRx = (saved.rxDev != null) ? String(saved.rxDev) : null;
+  const savedTx = (saved.txDev != null) ? String(saved.txDev) : null;
+
+  if(savedRx && hasOpt(rxSel, savedRx)) rxSel.value = savedRx;
+  else if(bh) rxSel.value = String(bh.index);
+
+  if(savedTx && hasOpt(txSel, savedTx)) txSel.value = savedTx;
+  else if(bhOut) txSel.value = String(bhOut.index);
+
+  // Restore enable toggles too
+  if(el('rxEnable') && saved.rxEnable != null) el('rxEnable').checked = !!saved.rxEnable;
+  if(el('txEnable') && saved.txEnable != null) el('txEnable').checked = !!saved.txEnable;
+
   log('Audio devices refreshed');
 }
 
@@ -646,11 +663,25 @@ el('clearLogBtn').onclick = () => el('logList').innerHTML='';
 if(el('clearQsoDisplayBtn')) el('clearQsoDisplayBtn').onclick = (ev) => { ev.preventDefault(); qsoLog = []; renderQsoLog(); };
 
 // --- WebSocket (FIXED): use BACKEND_WS so packaged file:// works ---
+
 let ws;
 function connectWS(){
   try{
     ws = new WebSocket(BACKEND_WS);
   }catch(e){
+    el('ws').classList.remove('ok');
+    setTimeout(connectWS, 1000);
+    return;
+  }
+  ws.onopen = () => { el('ws').classList.add('ok'); log('WS connected'); };
+  ws.onclose = () => { el('ws').classList.remove('ok'); setTimeout(connectWS, 1000); };
+  ws.onerror = () => { /* ignore; onclose will retry */ };
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+
+  };
+}
+catch(e){
     el('ws').classList.remove('ok');
     setTimeout(connectWS, 1000);
     return;
@@ -730,7 +761,12 @@ function saveSettings() {
     bandCustom: el('bandCustom') ? el('bandCustom').value : '',
     freqMHz: el('freqMHz') ? el('freqMHz').value : '',
     txTimeoutMin: el('txTimeoutMin') ? el('txTimeoutMin').value : '120',
-    txTimeoutOverride: el('txTimeoutOverride') ? !!el('txTimeoutOverride').checked : false
+    txTimeoutOverride: el('txTimeoutOverride') ? !!el('txTimeoutOverride').checked : false,
+    // Persist Audio I/O selections too (so restart comes back up ready)
+    rxDev: el('rxDev') ? parseInt(el('rxDev').value||'0',10) : null,
+    txDev: el('txDev') ? parseInt(el('txDev').value||'0',10) : null,
+    rxEnable: el('rxEnable') ? !!el('rxEnable').checked : true,
+    txEnable: el('txEnable') ? !!el('txEnable').checked : true
   };
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
@@ -740,6 +776,8 @@ function loadSettings() {
     const saved = localStorage.getItem(SETTINGS_KEY);
     if (saved) {
       const settings = JSON.parse(saved);
+      // Stash for later so refreshDevices() can apply it after options are populated.
+      window._msk2k_saved_settings = settings;
       if (settings.txSlot) el('txSlot').value = settings.txSlot;
       if (settings.rxPick) el('rxPick').value = settings.rxPick;
       if (settings.txPick) el('txPick').value = settings.txPick;
@@ -752,11 +790,19 @@ function loadSettings() {
       if (el('freqMHz') && settings.freqMHz != null) el('freqMHz').value = settings.freqMHz;
       if (el('txTimeoutMin') && settings.txTimeoutMin != null) el('txTimeoutMin').value = settings.txTimeoutMin;
       if (el('txTimeoutOverride') && settings.txTimeoutOverride != null) el('txTimeoutOverride').checked = !!settings.txTimeoutOverride;
+      // Audio I/O selections (restored after refreshDevices() too)
+      if (el('rxEnable') && settings.rxEnable != null) el('rxEnable').checked = !!settings.rxEnable;
+      if (el('txEnable') && settings.txEnable != null) el('txEnable').checked = !!settings.txEnable;
+      if (el('rxDev') && settings.rxDev != null) el('rxDev').value = String(settings.rxDev);
+      if (el('txDev') && settings.txDev != null) el('txDev').value = String(settings.txDev);
     }
   } catch (e) {
     console.warn('Failed to load settings:', e);
   }
 }
+
+// Ensure settings flush to disk on app close (Electron)
+window.addEventListener('beforeunload', () => { try{ saveSettings(); }catch(_e){} });
 
 function syncBandCustomVisibility(){
   const sel = el('bandSel');
@@ -791,7 +837,7 @@ function schedulePushTxTimeout(){
   _txTimeoutTimer = setTimeout(()=>{ pushTxTimeout(); }, 150);
 }
 
-['txSlot', 'rxPick', 'txPick', 'rxGain', 'txGain', 'myCall', 'periodLen', 'bandSel', 'bandCustom', 'freqMHz', 'txTimeoutMin', 'txTimeoutOverride'].forEach(id => {
+['txSlot', 'rxPick', 'txPick', 'rxGain', 'txGain', 'myCall', 'periodLen', 'bandSel', 'bandCustom', 'freqMHz', 'txTimeoutMin', 'txTimeoutOverride', 'rxDev', 'txDev', 'rxEnable', 'txEnable'].forEach(id => {
   const n = el(id);
   if(!n) return;
   n.addEventListener('change', saveSettings);
@@ -948,15 +994,12 @@ async function retryRefreshDevices(timeoutMs=20000){
   syncGainLabels();
 
   // Start WS immediately; it will retry until backend is up
-  connectWS();
-
-  // Wait for backend to be reachable before we spam API calls
+// Wait for backend to be reachable before we spam API calls
   const ready = await waitForBackendReady(20000);
   log(ready ? 'Backend reachable.' : 'Backend not reachable yet (still starting).');
 
   if(ready){
-    await retryRefreshDevices(20000);
-    await loadQsoLog();
+await loadQsoLog();
     schedulePushTxTimeout();
     schedulePushGains();
     setInterval(pollLevels, 250);
@@ -970,6 +1013,9 @@ async function retryRefreshDevices(timeoutMs=20000){
     }
   }
 
+
+  // Windows: audio devices can appear a moment after startup; try again when the window gains focus.
+  window.addEventListener('focus', () => { retryRefreshDevices(8000); }, { passive:true });
 })().catch(e=>{
   console.error(e);
   log('Init error: ' + (e?.message || e));
