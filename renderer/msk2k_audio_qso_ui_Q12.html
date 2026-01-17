@@ -13,6 +13,7 @@
     h4 { font-size:13px; }
     label { font-size:11px; color:#bbb; display:block; margin-bottom:4px; }
     .hdrLbl { font-size:11px; color:#9aa; letter-spacing:.08em; text-transform:uppercase; }
+
     /* Custom small checkbox for TX Timeout override */
     #txTimeoutOverride{
       -webkit-appearance:none; appearance:none;
@@ -80,11 +81,10 @@
     .clickable { cursor:pointer; }
     .clickable:hover { text-decoration: underline; }
     .mode-section { background:#1a1a1a; padding:8px; border-radius:6px; margin-top:8px; }
-  
+
     /* QSO Log */
     .qsoTable { margin-top:6px; border:1px solid #222; border-radius:8px; overflow:hidden; }
-    /* 7 columns: DATE, START, BAND, STATION, SENT, RCVD, END
-       Keep BAND compact and let STATION take the flexible width. */
+    /* 7 columns: DATE, START, BAND, STATION, SENT, RCVD, END */
     .qsoHead, .qsoRow { display:grid; grid-template-columns: 88px 80px 60px 1fr 60px 60px 80px; gap:8px; align-items:center; }
     .qsoHead { padding:6px 8px; background:#0b0b0b; border-bottom:1px solid #222; font-size:10px; color:#9aa; text-transform:uppercase; letter-spacing:.06em; }
     .qsoBody { max-height:170px; overflow:auto; }
@@ -95,115 +95,41 @@
     .qsoCall { font-weight:700; letter-spacing:.02em; }
     .qsoEmpty { padding:10px 8px; color:#777; font-size:11px; }
 
-  
-/* Audio Level Controls */
-.lvlCard { padding:8px; }
-.lvlGrid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; align-items:start; }
-.lvlTitle { font-size:11px; color:#9aa; letter-spacing:.08em; text-transform:uppercase; margin:0 0 6px 0; }
-.ledwrap { position:relative; }
-.ledbar { display:flex; gap:1px; align-items:center; height:7px; }
-.seg { flex:1; height:100%; background:#222; border:1px solid #111; border-radius:2px; opacity:.9; }
-.seg.on { background:#1f8f3a; }
-.ledbar.tx .seg.on { background:#1f6feb; }
-.ledbar.clip .seg.on { background:#c93c37; }
-.tick { position:absolute; top:-2px; bottom:-2px; width:2px; background:#666; opacity:.7; }
-.targetBand { position:absolute; top:-4px; bottom:-4px; background:rgba(255, 255, 255, 0.248); border:1px solid rgba(255,255,255,0.248); border-radius:3px; }
-.lvlMeta { display:flex; justify-content:space-between; gap:8px; margin-top:4px; font-size:10px; color:#9aa; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.lvlSlider { width:100%; }
-.lvlRow { margin-top:6px; display:flex; gap:8px; align-items:center; }
-.lvlRow input[type="range"]{ width:100%; }
-.lvlVal { width:56px; text-align:right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; color:#eee; }
-.lvlMini { margin-top:4px; font-size:10px; color:#9aa; display:flex; gap:10px; align-items:center; }
-.lvlMini label { display:flex; gap:6px; align-items:center; cursor:pointer; }
-.lvlMini input[type="checkbox"]{ transform:translateY(1px); }
-.sticky { position: sticky; top: 8px; z-index: 20; }
+    /* Audio Level Controls */
+    .lvlCard { padding:8px; }
+    .lvlGrid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; align-items:start; }
+    .lvlTitle { font-size:11px; color:#9aa; letter-spacing:.08em; text-transform:uppercase; margin:0 0 6px 0; }
+    .ledwrap { position:relative; }
+    .ledbar { display:flex; gap:1px; align-items:center; height:7px; }
+    .seg { flex:1; height:100%; background:#222; border:1px solid #111; border-radius:2px; opacity:.9; }
+    .seg.on { background:#1f8f3a; }
+    .ledbar.tx .seg.on { background:#1f6feb; }
+    .ledbar.clip .seg.on { background:#c93c37; }
+    .tick { position:absolute; top:-2px; bottom:-2px; width:2px; background:#666; opacity:.7; }
+    .targetBand { position:absolute; top:-4px; bottom:-4px; background:rgba(255, 255, 255, 0.248); border:1px solid rgba(255,255,255,0.248); border-radius:3px; }
+    .lvlMeta { display:flex; justify-content:space-between; gap:8px; margin-top:4px; font-size:10px; color:#9aa; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .lvlRow { margin-top:6px; display:flex; gap:8px; align-items:center; }
+    .lvlRow input[type="range"]{ width:100%; }
+    .lvlVal { width:56px; text-align:right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; color:#eee; }
+    .lvlMini { margin-top:4px; font-size:10px; color:#9aa; display:flex; gap:10px; align-items:center; }
+    .lvlMini label { display:flex; gap:6px; align-items:center; cursor:pointer; }
+    .lvlMini input[type="checkbox"]{ transform:translateY(1px); }
+    .sticky { position: sticky; top: 8px; z-index: 20; }
 
-/* Custom Range Slider Styling - Override System Defaults */
-input[type="range"] {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
-  cursor: pointer;
-  height: 24px;
-}
-
-/* Track styling */
-input[type="range"]::-webkit-slider-runnable-track {
-  background: linear-gradient(to right, #1a1a1a 0%, #2a2a2a 100%);
-  height: 6px;
-  border-radius: 3px;
-  border: 1px solid #333;
-}
-
-input[type="range"]::-moz-range-track {
-  background: linear-gradient(to right, #1a1a1a 0%, #2a2a2a 100%);
-  height: 6px;
-  border-radius: 3px;
-  border: 1px solid #333;
-}
-
-/* Thumb styling */
-input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  margin-top: -5px;
-  background: #444;
-  height: 16px;
-  width: 16px;
-  border-radius: 8px;
-  border: 2px solid #666;
-  transition: all 0.15s ease;
-}
-
-input[type="range"]::-moz-range-thumb {
-  background: #444;
-  height: 16px;
-  width: 16px;
-  border-radius: 8px;
-  border: 2px solid #666;
-  transition: all 0.15s ease;
-}
-
-/* Hover effects */
-input[type="range"]:hover::-webkit-slider-thumb {
-  background: #555;
-  border-color: #888;
-}
-
-input[type="range"]:hover::-moz-range-thumb {
-  background: #555;
-  border-color: #888;
-}
-
-/* Active/dragging effects */
-input[type="range"]:active::-webkit-slider-thumb {
-  background: #666;
-  border-color: #999;
-  transform: scale(1.1);
-}
-
-input[type="range"]:active::-moz-range-thumb {
-  background: #666;
-  border-color: #999;
-  transform: scale(1.1);
-}
-
-/* Focus styling */
-input[type="range"]:focus {
-  outline: none;
-}
-
-input[type="range"]:focus::-webkit-slider-thumb {
-  border-color: #1f6feb;
-  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.2);
-}
-
-input[type="range"]:focus::-moz-range-thumb {
-  border-color: #1f6feb;
-  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.2);
-}
-
-</style>
+    /* Range slider styling */
+    input[type="range"] { -webkit-appearance:none; appearance:none; background:transparent; cursor:pointer; height:24px; }
+    input[type="range"]::-webkit-slider-runnable-track { background: linear-gradient(to right, #1a1a1a 0%, #2a2a2a 100%); height: 6px; border-radius: 3px; border: 1px solid #333; }
+    input[type="range"]::-moz-range-track { background: linear-gradient(to right, #1a1a1a 0%, #2a2a2a 100%); height: 6px; border-radius: 3px; border: 1px solid #333; }
+    input[type="range"]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; margin-top:-5px; background:#444; height:16px; width:16px; border-radius:8px; border:2px solid #666; transition: all 0.15s ease; }
+    input[type="range"]::-moz-range-thumb { background:#444; height:16px; width:16px; border-radius:8px; border:2px solid #666; transition: all 0.15s ease; }
+    input[type="range"]:hover::-webkit-slider-thumb { background:#555; border-color:#888; }
+    input[type="range"]:hover::-moz-range-thumb { background:#555; border-color:#888; }
+    input[type="range"]:active::-webkit-slider-thumb { background:#666; border-color:#999; transform: scale(1.1); }
+    input[type="range"]:active::-moz-range-thumb { background:#666; border-color:#999; transform: scale(1.1); }
+    input[type="range"]:focus { outline:none; }
+    input[type="range"]:focus::-webkit-slider-thumb { border-color:#1f6feb; box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.2); }
+    input[type="range"]:focus::-moz-range-thumb { border-color:#1f6feb; box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.2); }
+  </style>
 </head>
 <body>
   <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -255,6 +181,7 @@ input[type="range"]:focus::-moz-range-thumb {
         Override
       </label>
     </div>
+
     <div class="row" style="align-items:center;margin-top:8px;">
       <span class="hdrLbl">NEXT TX:</span>
       <div class="mono" id="nextTx" style="flex:1;padding:6px 8px;font-size:12px;border-left:3px solid #1f6feb;background:#0d1118;">(none)</div>
@@ -265,7 +192,6 @@ input[type="range"]:focus::-moz-range-thumb {
     </div>
   </div>
 
-  <!-- Active QSO and Public Activity side by side -->
   <div class="grid" style="margin-top:8px;">
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -283,8 +209,6 @@ input[type="range"]:focus::-moz-range-thumb {
     </div>
   </div>
 
-
-  <!-- QSO Log collapsible -->
   <details class="card" style="margin-top:8px;" open>
     <summary style="cursor:pointer;font-weight:bold;font-size:13px;">
       QSO Log
@@ -300,65 +224,50 @@ input[type="range"]:focus::-moz-range-thumb {
     </div>
   </details>
 
+  <details class="card lvlCard sticky" style="margin-top:8px;" open>
+    <summary style="cursor:pointer;font-weight:bold;font-size:13px;">Audio Levels</summary>
 
-
-  
-
-
-  
-  <!-- Audio Levels collapsible -->
-<details class="card lvlCard sticky" style="margin-top:8px;" open>
-  <summary style="cursor:pointer;font-weight:bold;font-size:13px;">
-    Audio Levels
-  </summary>
-
-  <div style="margin-top:8px;">
-    <div class="lvlGrid">
-
-      <div>
-        <div class="lvlTitle">TX Level</div>
-        <div class="ledwrap">
-          <div class="targetBand" id="txTargetBand"></div>
-          <div class="tick" id="txTickLo"></div>
-          <div class="tick" id="txTickHi"></div>
-          <div class="ledbar tx" id="txBar"></div>
+    <div style="margin-top:8px;">
+      <div class="lvlGrid">
+        <div>
+          <div class="lvlTitle">TX Level</div>
+          <div class="ledwrap">
+            <div class="targetBand" id="txTargetBand"></div>
+            <div class="tick" id="txTickLo"></div>
+            <div class="tick" id="txTickHi"></div>
+            <div class="ledbar tx" id="txBar"></div>
+          </div>
+          <div class="lvlMeta">
+            <div id="txDb">--.- dBFS</div>
+            <div id="txClip"> </div>
+          </div>
+          <div class="lvlRow">
+            <input id="txGain" type="range" min="0.05" max="1.00" step="0.01" value="0.50" />
+            <div class="lvlVal" id="txGainVal">0.50</div>
+          </div>
         </div>
-        <div class="lvlMeta">
-          <div id="txDb">--.- dBFS</div>
-          <div id="txClip"> </div>
-        </div>
-        <div class="lvlRow">
-          <input id="txGain" type="range" min="0.05" max="1.00" step="0.01" value="0.50" />
-          <div class="lvlVal" id="txGainVal">0.50</div>
+
+        <div>
+          <div class="lvlTitle">RX Level</div>
+          <div class="ledwrap">
+            <div class="targetBand" id="rxTargetBand"></div>
+            <div class="tick" id="rxTickLo"></div>
+            <div class="tick" id="rxTickHi"></div>
+            <div class="ledbar" id="rxBar"></div>
+          </div>
+          <div class="lvlMeta">
+            <div id="rxDb">--.- dBFS</div>
+            <div id="rxClip"> </div>
+          </div>
+          <div class="lvlRow">
+            <input id="rxGain" type="range" min="0.05" max="2.00" step="0.01" value="1.00" />
+            <div class="lvlVal" id="rxGainVal">1.00</div>
+          </div>
         </div>
       </div>
-
-      <div>
-        <div class="lvlTitle">RX Level</div>
-        <div class="ledwrap">
-          <div class="targetBand" id="rxTargetBand"></div>
-          <div class="tick" id="rxTickLo"></div>
-          <div class="tick" id="rxTickHi"></div>
-          <div class="ledbar" id="rxBar"></div>
-        </div>
-        <div class="lvlMeta">
-          <div id="rxDb">--.- dBFS</div>
-          <div id="rxClip"> </div>
-        </div>
-        <div class="lvlRow">
-          <input id="rxGain" type="range" min="0.05" max="2.00" step="0.01" value="1.00" />
-          <div class="lvlVal" id="rxGainVal">1.00</div>
-        </div>
-      <!-----  <div class="lvlMini">
-          <label><input id="rxAuto" type="checkbox" /> Auto RX (slow)</label>
-          <span style="opacity:.8;">Target: <span id="rxTargetLbl">-20 dBFS</span></span>
-        </div>
-      </div>-->
-
     </div>
-  </div>
-</details>
-  <!-- Audio I/O collapsible at bottom -->
+  </details>
+
   <details class="card" style="margin-top:8px;" id="audioIoDetails">
     <summary style="cursor:pointer;font-weight:bold;font-size:13px;">Audio I/O</summary>
     <div style="margin-top:8px;">
@@ -390,7 +299,7 @@ input[type="range"]:focus::-moz-range-thumb {
             <option value="2">Ch 2</option>
           </select>
         </div>
-</div>
+      </div>
       <div class="row" style="margin-top:8px;">
         <div>
           <label style="margin-bottom:6px;">Enable</label>
@@ -406,7 +315,7 @@ input[type="range"]:focus::-moz-range-thumb {
       </div>
     </div>
   </details>
-  <!-- System Log collapsible -->
+
   <details class="card" style="margin-top:8px;">
     <summary style="cursor:pointer;font-weight:bold;font-size:13px;">System Log <button id="clearLogBtn" style="float:right;font-size:10px;padding:2px 6px;">Clear</button></summary>
     <div class="list" id="logList" style="height:120px;margin-top:6px;"></div>
@@ -415,7 +324,44 @@ input[type="range"]:focus::-moz-range-thumb {
 <script>
 const el = (id) => document.getElementById(id);
 
-// Independent UTC clock - updates every 100ms for accuracy
+// --- Backend base URL (works for file:// and http://) ---
+const DEFAULT_BACKEND = 'http://127.0.0.1:8088';
+
+// If served via http(s), use same origin. If file:// (Electron packaged), use localhost (or ?backend=... override)
+const BACKEND_HTTP =
+  (location.protocol === 'http:' || location.protocol === 'https:')
+    ? `${location.protocol}//${location.host}`
+    : (new URLSearchParams(location.search).get('backend') || DEFAULT_BACKEND);
+
+const BACKEND_WS = BACKEND_HTTP.replace(/^http/i, 'ws') + '/ws';
+
+function apiUrl(path){
+  if(!path) return BACKEND_HTTP;
+  if(/^https?:\/\//i.test(path)) return path;
+  if(path.startsWith('/')) return BACKEND_HTTP + path;
+  return BACKEND_HTTP + '/' + path;
+}
+
+async function post(path, body){
+  const r = await fetch(apiUrl(path), {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body||{}),
+    cache: 'no-store'
+  });
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok){ throw new Error(j.error || r.statusText); }
+  return j;
+}
+
+async function get(path){
+  const r = await fetch(apiUrl(path), { cache: 'no-store' });
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok){ throw new Error(j.error || r.statusText); }
+  return j;
+}
+
+// Independent UTC clock - updates every 100ms
 function updateClock(){
   const now = new Date();
   const h = String(now.getUTCHours()).padStart(2,'0');
@@ -442,24 +388,10 @@ function addItem(listEl, meta, msg, extra={}){
 
 function log(msg){ addItem(el('logList'), new Date().toLocaleTimeString(), msg); }
 
-async function post(path, body){
-  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
-  const j = await r.json().catch(()=>({}));
-  if(!r.ok){ throw new Error(j.error || r.statusText); }
-  return j;
-}
-async function get(path){
-  const r = await fetch(path);
-  const j = await r.json().catch(()=>({}));
-  if(!r.ok){ throw new Error(j.error || r.statusText); }
-  return j;
-}
-
 let devices = [];
 let running = false;
 
-
-// QSO log (client-side view; persisted on server in ADIF)
+// QSO log
 let qsoLog = [];
 
 function fmtAdifDate(yyyymmdd){
@@ -483,7 +415,6 @@ function renderQsoLog(){
     body.appendChild(d);
     return;
   }
-  // Newest first, and show all (scroll for more)
   for(const q of qsoLog){
     const row = document.createElement('div');
     row.className = 'qsoRow';
@@ -516,7 +447,6 @@ async function loadQsoLog(){
   }
 }
 
-
 function devLabel(d){
   const inCh = d.max_input_channels || 0;
   const outCh = d.max_output_channels || 0;
@@ -533,6 +463,7 @@ async function refreshDevices(){
     const opt2 = document.createElement('option'); opt2.value = d.index; opt2.textContent = devLabel(d);
     rxSel.appendChild(opt1); txSel.appendChild(opt2);
   }
+  // Auto-pick BlackHole if present (mac). On Windows, do nothing special.
   const bh = devices.find(d => (d.name||'').toLowerCase().includes('blackhole') && (d.max_input_channels||0) > 0);
   const bhOut = devices.find(d => (d.name||'').toLowerCase().includes('blackhole') && (d.max_output_channels||0) > 0);
   if(bh) rxSel.value = String(bh.index);
@@ -545,12 +476,11 @@ el('refreshDevsBtn').onclick = () => refreshDevices().catch(e=>alert(e.message))
 el('applyAudioBtn').onclick = async () => {
   const btn = el('applyAudioBtn');
   const originalText = btn.textContent;
-  
+
   try{
-    // Visual feedback
     btn.disabled = true;
     btn.textContent = 'Applying...';
-    
+
     const resp = await post('/api/audio', {
       rx_device: parseInt(el('rxDev').value,10),
       tx_device: parseInt(el('txDev').value,10),
@@ -561,38 +491,33 @@ el('applyAudioBtn').onclick = async () => {
       rx_enable: el('rxEnable').checked,
       tx_enable: el('txEnable').checked
     });
-    
-    // Success feedback
+
     btn.textContent = '✓ Applied';
     btn.classList.add('active');
-    
+
     if(resp.diagnostics){
       log(`Audio applied - RX: ${resp.diagnostics.rx}`);
       log(`Audio applied - TX: ${resp.diagnostics.tx}`);
-      if(resp.diagnostics.rx.includes('!=') || resp.diagnostics.tx.includes('!=')){
+      if((resp.diagnostics.rx||'').includes('!=') || (resp.diagnostics.tx||'').includes('!=')){
         log('⚠️ Warning: Sample rate mismatch may cause errors');
       }
     } else {
       log('Audio selection applied');
     }
-    
-    // Reset button after delay
+
     setTimeout(() => {
       btn.textContent = originalText;
       btn.classList.remove('active');
       btn.disabled = false;
     }, 1500);
-    
-  }catch(e){ 
-    // Error feedback
+  }catch(e){
     btn.textContent = '✗ Failed';
     btn.classList.remove('primary');
     btn.classList.add('danger');
-    
+
     log(`❌ Audio config failed: ${e.message}`);
     alert(e.message);
-    
-    // Reset button after delay
+
     setTimeout(() => {
       btn.textContent = originalText;
       btn.classList.remove('danger');
@@ -609,38 +534,55 @@ el('diagBtn').onclick = async () => {
       log(`📊 Diagnostics - RX: ${diag.diagnostics.rx}`);
       log(`📊 Diagnostics - TX: ${diag.diagnostics.tx}`);
       log(`📊 Diagnostics - Rate: ${diag.diagnostics.sample_rate}`);
-      
-      const hasIssues = diag.diagnostics.rx.includes('!=') || 
-                        diag.diagnostics.tx.includes('!=') ||
-                        !diag.diagnostics.rx.includes('OK') ||
-                        !diag.diagnostics.tx.includes('OK');
-      
-      if(hasIssues){
-        alert('⚠️ Configuration issues detected - check the log for details');
-      } else {
-        alert('✓ Audio configuration looks good!');
-      }
+
+      const hasIssues = (diag.diagnostics.rx||'').includes('!=') ||
+                        (diag.diagnostics.tx||'').includes('!=') ||
+                        !(diag.diagnostics.rx||'').includes('OK') ||
+                        !(diag.diagnostics.tx||'').includes('OK');
+
+      alert(hasIssues ? '⚠️ Configuration issues detected - check the log for details' : '✓ Audio configuration looks good!');
     }
-  }catch(e){ 
+  }catch(e){
     log(`❌ Diagnostics failed: ${e.message}`);
-    alert(e.message); 
+    alert(e.message);
   }
 };
 
+let currentMode = '';
+
+function updateModeButtons(mode){
+  currentMode = mode;
+  el('listenBtn').classList.toggle('active', mode === 'LISTEN');
+  el('cqBtn').classList.toggle('active', mode === 'CQ');
+  if(mode === '' || mode === 'LISTEN' || mode === 'CQ') {
+    el('callBtn').classList.remove('active');
+  }
+  el('stopBtn').classList.toggle('active', mode !== '');
+}
+
+function syncButtonsFromState(qso_state){
+  if(qso_state === 'IDLE') {
+    updateModeButtons('');
+  } else if(qso_state === 'LISTEN') {
+    updateModeButtons('LISTEN');
+  } else if(qso_state === 'CALLING_CQ') {
+    updateModeButtons('CQ');
+  }
+}
+
 async function startMode(mode, theirCall='', corr=null){
-  // Update buttons immediately for responsive feel
   updateModeButtons(mode);
-  
+
   if(running){
     log('Already running - stopping first');
     await post('/api/stop', {});
     running = false;
   }
 
-  // Clear Active QSO list when starting a new QSO/mode
   el('activeList').innerHTML = '';
 
-  await el('applyAudioBtn').onclick(); // Apply audio
+  // Apply audio selection
+  await el('applyAudioBtn').onclick();
 
   const payload = {
     my_call: el('myCall').value.trim().toUpperCase(),
@@ -654,39 +596,12 @@ async function startMode(mode, theirCall='', corr=null){
     freq_mhz: el('freqMHz') ? el('freqMHz').value.trim() : '',
     tx_timeout_min: el('txTimeoutMin') ? parseInt(el('txTimeoutMin').value || '0',10) : 0,
     tx_timeout_override: el('txTimeoutOverride') ? !!el('txTimeoutOverride').checked : false,
-    // If replying from a clicked decode, pass its correlation so server can latch report immediately
     ...(mode === 'REPLY' && typeof corr === 'number' ? { initial_corr: corr } : {}),
   };
 
   await post('/api/start', payload);
   running = true;
-  currentMode = mode;
   log(`Started: ${mode}${theirCall ? ' → '+theirCall : ''}`);
-}
-
-let currentMode = '';
-
-function updateModeButtons(mode){
-  currentMode = mode;
-  el('listenBtn').classList.toggle('active', mode === 'LISTEN');
-  el('cqBtn').classList.toggle('active', mode === 'CQ');
-  // Only clear Call button if we're going to IDLE (not just switching modes)
-  if(mode === '' || mode === 'LISTEN' || mode === 'CQ') {
-    el('callBtn').classList.remove('active');
-  }
-  el('stopBtn').classList.toggle('active', mode !== '');
-}
-
-// Sync button state from server's qso_state
-function syncButtonsFromState(qso_state){
-  if(qso_state === 'IDLE') {
-    updateModeButtons('');
-  } else if(qso_state === 'LISTEN') {
-    updateModeButtons('LISTEN');
-  } else if(qso_state === 'CALLING_CQ') {
-    updateModeButtons('CQ');
-  }
-  // Don't change buttons during IN_QSO/REPORTS - keep current mode shown
 }
 
 async function stopMode(){
@@ -700,21 +615,15 @@ async function stopMode(){
 
 el('listenBtn').onclick = async () => {
   try{
-    if(currentMode === 'LISTEN'){
-      await stopMode();
-    } else {
-      await startMode('LISTEN');
-    }
+    if(currentMode === 'LISTEN') await stopMode();
+    else await startMode('LISTEN');
   }catch(e){ alert(e.message); }
 };
 
 el('cqBtn').onclick = async () => {
   try{
-    if(currentMode === 'CQ'){
-      await stopMode();
-    } else {
-      await startMode('CQ');
-    }
+    if(currentMode === 'CQ') await stopMode();
+    else await startMode('CQ');
   }catch(e){ alert(e.message); }
 };
 
@@ -728,9 +637,7 @@ el('callBtn').onclick = async () => {
 };
 
 el('stopBtn').onclick = async () => {
-  try{
-    await stopMode();
-  }catch(e){ alert(e.message); }
+  try{ await stopMode(); }catch(e){ alert(e.message); }
 };
 
 el('clearActiveBtn').onclick = () => el('activeList').innerHTML='';
@@ -738,12 +645,21 @@ el('clearPublicBtn').onclick = () => { el('publicList').innerHTML=''; el('callBt
 el('clearLogBtn').onclick = () => el('logList').innerHTML='';
 if(el('clearQsoDisplayBtn')) el('clearQsoDisplayBtn').onclick = (ev) => { ev.preventDefault(); qsoLog = []; renderQsoLog(); };
 
+// --- WebSocket (FIXED): use BACKEND_WS so packaged file:// works ---
 let ws;
 function connectWS(){
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  try{
+    ws = new WebSocket(BACKEND_WS);
+  }catch(e){
+    el('ws').classList.remove('ok');
+    setTimeout(connectWS, 1000);
+    return;
+  }
+
   ws.onopen = () => { el('ws').classList.add('ok'); log('WS connected'); };
   ws.onclose = () => { el('ws').classList.remove('ok'); setTimeout(connectWS, 1000); };
+  ws.onerror = () => { /* handled by onclose retry */ };
+
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if(m.type === 'tick'){
@@ -753,9 +669,7 @@ function connectWS(){
       el('state').textContent = m.qso_state;
       el('state').classList.toggle('active', m.qso_state !== 'IDLE');
       el('nextTx').textContent = m.next_tx || '(none)';
-      // Sync button states from server
       syncButtonsFromState(m.qso_state);
-      // Sync their_call - set if provided, clear if empty and we're IDLE/LISTEN
       if(m.their_call) {
         el('theirCall').value = m.their_call;
       } else if(m.qso_state === 'IDLE' || m.qso_state === 'LISTEN') {
@@ -769,21 +683,17 @@ function connectWS(){
       if(m.visibility === 'public'){
         const call = (m.from || '').trim();
         const click = call ? async () => {
-          // Auto-start answering this CQ
           try{
-            // Immediately show our planned response in Active QSO FIRST
             const myCall = el('myCall').value.trim().toUpperCase();
             const ourResponse = `${call} de ${myCall} (pending...)`;
             const nowTs = new Date().toISOString().substr(11,8) + 'Z';
             addItem(el('activeList'), `${nowTs} → TX queued`, ourResponse, {type:'tx'});
-            
             el('theirCall').value = call;
-            await startMode("REPLY", call, corr);
+            await startMode('REPLY', call, corr);
             log(`Answering CQ from ${call}`);
           }catch(e){ alert(e.message); }
         } : null;
         addItem(el('publicList'), meta, m.text, {click, type:'rx'});
-        // Light up Call button when there are CQs to answer
         if(call) el('callBtn').classList.add('active');
       } else {
         addItem(el('activeList'), meta, m.text, {type:'rx'});
@@ -791,16 +701,12 @@ function connectWS(){
     } else if(m.type === 'tx'){
       const msgType = m.msg_type ? ` [${m.msg_type}]` : '';
       addItem(el('logList'), m.ts, `TX${msgType}: ${m.text}`, {type:'tx'});
-      // Also show TX in Active QSO for visibility
       addItem(el('activeList'), `${m.ts} TX${msgType}`, m.text, {type:'tx'});
     } else if(m.type === 'qso_complete'){
-      // QSO finished
       addItem(el('activeList'), `${m.ts} ✓ COMPLETE`, `QSO with ${m.partner} finished`);
       log(`✓ QSO with ${m.partner} complete`);
       if(m.qso){ addQsoToTop(m.qso); }
-      // Clear the callsign box
       el('theirCall').value = '';
-      // Clear Active QSO after 3 seconds
       setTimeout(() => { el('activeList').innerHTML = ''; }, 3000);
     } else if(m.type === 'info'){
       log(m.message);
@@ -818,7 +724,6 @@ function saveSettings() {
     txPick: el('txPick').value,
     rxGain: el('rxGain').value,
     txGain: el('txGain').value,
-    rxAuto: el('rxAuto') ? !!el('rxAuto').checked : false,
     myCall: el('myCall').value,
     periodLen: el('periodLen').value,
     bandSel: el('bandSel') ? el('bandSel').value : '144',
@@ -840,7 +745,6 @@ function loadSettings() {
       if (settings.txPick) el('txPick').value = settings.txPick;
       if (settings.rxGain) el('rxGain').value = settings.rxGain;
       if (settings.txGain) el('txGain').value = settings.txGain;
-      if (el('rxAuto') && settings.rxAuto != null) el('rxAuto').checked = !!settings.rxAuto;
       if (settings.myCall) el('myCall').value = settings.myCall;
       if (settings.periodLen) el('periodLen').value = settings.periodLen;
       if (el('bandSel') && settings.bandSel) el('bandSel').value = settings.bandSel;
@@ -879,9 +783,7 @@ async function pushTxTimeout(){
       minutes: parseInt(el('txTimeoutMin').value || '0', 10),
       override: !!el('txTimeoutOverride').checked
     });
-  }catch(_e){
-    // ignore transient errors
-  }
+  }catch(_e){ /* ignore */ }
 }
 
 function schedulePushTxTimeout(){
@@ -889,20 +791,19 @@ function schedulePushTxTimeout(){
   _txTimeoutTimer = setTimeout(()=>{ pushTxTimeout(); }, 150);
 }
 
-// Save settings when changed
 ['txSlot', 'rxPick', 'txPick', 'rxGain', 'txGain', 'myCall', 'periodLen', 'bandSel', 'bandCustom', 'freqMHz', 'txTimeoutMin', 'txTimeoutOverride'].forEach(id => {
-  el(id).addEventListener('change', saveSettings);
-  el(id).addEventListener('input', saveSettings);
+  const n = el(id);
+  if(!n) return;
+  n.addEventListener('change', saveSettings);
+  n.addEventListener('input', saveSettings);
 });
 
-// Band custom + TX timeout UI behaviour
 if(el('bandSel')) el('bandSel').addEventListener('change', () => { syncBandCustomVisibility(); saveSettings(); });
 if(el('txTimeoutOverride')) el('txTimeoutOverride').addEventListener('change', () => { syncTxTimeoutUI(); schedulePushTxTimeout(); saveSettings(); });
 if(el('txTimeoutMin')){
   el('txTimeoutMin').addEventListener('change', () => { schedulePushTxTimeout(); saveSettings(); });
   el('txTimeoutMin').addEventListener('input', () => { schedulePushTxTimeout(); saveSettings(); });
 }
-
 
 function buildLedBar(containerId, segments=28){
   const c = el(containerId);
@@ -913,7 +814,8 @@ function buildLedBar(containerId, segments=28){
     c.appendChild(s);
   }
 }
-function setLedBar(containerId, dbfs, clip, isTx=false){
+
+function setLedBar(containerId, dbfs, clip){
   const c = el(containerId);
   const segs = Array.from(c.children);
   if(dbfs == null || isNaN(dbfs)){
@@ -921,7 +823,6 @@ function setLedBar(containerId, dbfs, clip, isTx=false){
     c.classList.toggle('clip', false);
     return;
   }
-  // Map -60..0 dBFS => 0..1
   const v = Math.max(0, Math.min(1, (dbfs + 60) / 60));
   const onCount = Math.round(v * segs.length);
   segs.forEach((s, i)=> s.classList.toggle('on', i < onCount));
@@ -933,7 +834,6 @@ function syncGainLabels(){
   if(el('txGainVal')) el('txGainVal').textContent = Number(el('txGain').value).toFixed(2);
 }
 
-// Target "sweet spot" for RMS level (dBFS). This is a guidance band, not a hard rule.
 const TARGET_LO_DBFS = -26;
 const TARGET_HI_DBFS = -14;
 const AUTO_TARGET_DBFS = -20;
@@ -963,23 +863,18 @@ function setTargetMarks(){
   };
   band('rxTargetBand');
   band('txTargetBand');
-  const lbl = el('rxTargetLbl');
-  if(lbl) lbl.textContent = `${AUTO_TARGET_DBFS} dBFS`;
 }
 
 let _gainTimer = null;
 async function pushGains(){
-  // Apply gains immediately without touching device/channel selection.
   try{
     await post('/api/gain', {
       rx_gain: parseFloat(el('rxGain').value || '1.0'),
       tx_gain: parseFloat(el('txGain').value || '0.6'),
-      auto_rx: !!el('rxAuto')?.checked,
+      auto_rx: false,
       auto_target_dbfs: AUTO_TARGET_DBFS,
     });
-  }catch(_e){
-    // ignore transient errors during startup
-  }
+  }catch(_e){ /* ignore */ }
 }
 
 function schedulePushGains(){
@@ -996,8 +891,8 @@ async function pollLevels(){
       const rxRms = rx.rms_dbfs;
       const txRms = tx.rms_dbfs;
 
-      setLedBar('rxBar', rxRms, rx.clip, false);
-      setLedBar('txBar', txRms, tx.clip, true);
+      setLedBar('rxBar', rxRms, rx.clip);
+      setLedBar('txBar', txRms, tx.clip);
 
       el('rxDb').textContent = (rxRms==null ? '--.- dBFS' : `${rxRms.toFixed(1)} dBFS`);
       el('txDb').textContent = (txRms==null ? '--.- dBFS' : `${txRms.toFixed(1)} dBFS`);
@@ -1005,9 +900,7 @@ async function pollLevels(){
       el('rxClip').textContent = rx.clip ? 'CLIP' : '';
       el('txClip').textContent = tx.clip ? 'CLIP' : '';
     }
-  }catch(_e){
-    // ignore while starting up
-  }
+  }catch(_e){ /* ignore */ }
 }
 
 buildLedBar('rxBar', 28);
@@ -1016,29 +909,23 @@ setTargetMarks();
 syncGainLabels();
 el('rxGain').addEventListener('input', () => { syncGainLabels(); saveSettings(); schedulePushGains(); });
 el('txGain').addEventListener('input', () => { syncGainLabels(); saveSettings(); schedulePushGains(); });
-if(el('rxAuto')) el('rxAuto').addEventListener('change', () => { saveSettings(); schedulePushGains(); });
 
-// poll faster than WS tick so the bar feels "alive"
-// (started in init after backend is reachable)
-
-
-
-// --- Startup robustness (Electron packaged): wait for backend + retry device enumeration ---
+// --- Startup robustness ---
 function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
-async function waitForBackendReady(timeoutMs=15000){
+async function waitForBackendReady(timeoutMs=20000){
   const start = Date.now();
   while(Date.now() - start < timeoutMs){
     try{
-      const r = await fetch(BACKEND_HTTP + '/api/devices', { cache: 'no-store' });
+      const r = await fetch(apiUrl('/api/devices'), { cache: 'no-store' });
       if(r.ok) return true;
-    }catch(_e){/* ignore */}
+    }catch(_e){ /* ignore */ }
     await sleep(250);
   }
   return false;
 }
 
-async function retryRefreshDevices(timeoutMs=15000){
+async function retryRefreshDevices(timeoutMs=20000){
   const start = Date.now();
   while(Date.now() - start < timeoutMs){
     try{
@@ -1052,6 +939,7 @@ async function retryRefreshDevices(timeoutMs=15000){
   }
   return false;
 }
+
 (async function init(){
   loadSettings();
   syncBandCustomVisibility();
@@ -1059,45 +947,31 @@ async function retryRefreshDevices(timeoutMs=15000){
   setTargetMarks();
   syncGainLabels();
 
-  // Start WS straight away (it will auto-retry)
+  // Start WS immediately; it will retry until backend is up
   connectWS();
 
-  // Wait until the Python backend is actually listening before we do any API calls.
-  // This avoids the "Ctrl+R" requirement after first launch.
+  // Wait for backend to be reachable before we spam API calls
   const ready = await waitForBackendReady(20000);
-  if(!ready){
-    log('Backend not reachable yet (still starting).');
-  } else {
-    log('Backend reachable.');
+  log(ready ? 'Backend reachable.' : 'Backend not reachable yet (still starting).');
+
+  if(ready){
+    await retryRefreshDevices(20000);
+    await loadQsoLog();
+    schedulePushTxTimeout();
+    schedulePushGains();
+    setInterval(pollLevels, 250);
+    pollLevels();
+
+    const aio = el('audioIoDetails');
+    if(aio){
+      aio.addEventListener('toggle', () => {
+        if(aio.open){ retryRefreshDevices(5000); }
+      });
+    }
   }
 
-  // Try to populate Audio I/O selectors; keep retrying briefly because
-  // audio enumeration on Windows can lag behind server startup.
-  await retryRefreshDevices(20000);
-
-  // QSO log is non-critical; don't break UI if it fails
-  await loadQsoLog();
-
-  // Push initial settings once backend is up
-  schedulePushTxTimeout();
-  schedulePushGains();
-
-  // Start level polling after backend is up (otherwise you get connection-refused spam)
-  setInterval(pollLevels, 250);
-  pollLevels();
-
-  // Also re-try enumeration when the user opens Audio I/O
-  const aio = el('audioIoDetails');
-  if(aio){
-    aio.addEventListener('toggle', () => {
-      if(aio.open){
-        retryRefreshDevices(5000);
-      }
-    });
-  }
 })().catch(e=>{
   console.error(e);
-  // avoid modal alert loops in Electron packaged mode
   log('Init error: ' + (e?.message || e));
 });
 </script>
