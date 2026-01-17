@@ -678,21 +678,6 @@ function connectWS(){
   ws.onerror = () => { /* ignore; onclose will retry */ };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
-
-  };
-}
-catch(e){
-    el('ws').classList.remove('ok');
-    setTimeout(connectWS, 1000);
-    return;
-  }
-
-  ws.onopen = () => { el('ws').classList.add('ok'); log('WS connected'); };
-  ws.onclose = () => { el('ws').classList.remove('ok'); setTimeout(connectWS, 1000); };
-  ws.onerror = () => { /* handled by onclose retry */ };
-
-  ws.onmessage = (ev) => {
-    const m = JSON.parse(ev.data);
     if(m.type === 'tick'){
       el('period').textContent = m.period_label;
       el('rxTx').textContent = m.rx_tx;
