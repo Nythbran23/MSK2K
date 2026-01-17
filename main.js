@@ -1,6 +1,7 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const fs = require('fs');
 
 let mainWindow;
 let pythonProcess;
@@ -17,16 +18,33 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'msk2k_audio_qso_ui_Q12.html'));
   
-  // Open DevTools to see console logs
+  // Open DevTools
   mainWindow.webContents.openDevTools();
   
-  startPythonBackend();
+  // Wait a bit for window to be ready, then start Python
+  setTimeout(() => {
+    startPythonBackend();
+  }, 1000);
+}
+
+function logToConsole(msg) {
+  console.log(msg);
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.executeJavaScript(`console.log(${JSON.stringify(msg)})`);
+  }
 }
 
 function startPythonBackend() {
   const isDev = !app.isPackaged;
   let pythonPath;
   let scriptPath;
+  
+  logToConsole('=== STARTING PYTHON BACKEND ===');
+  logToConsole(`Mode: ${isDev ? 'Development' : 'Production'}`);
+  logToConsole(`Platform: ${process.platform}`);
+  logToConsole(`Packaged: ${app.isPackaged}`);
+  logToConsole(`__dirname: ${__dirname}`);
+  logToConsole(`process.resourcesPath: ${process.resourcesPath}`);
   
   if (isDev) {
     pythonPath = process.platform === 'win32' ? 'python' : 'python3';
@@ -36,41 +54,66 @@ function startPythonBackend() {
       pythonPath = path.join(process.resourcesPath, 'python', 'python.exe');
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_audio_qso_server_Q12.py');
     } else if (process.platform === 'darwin') {
-      pythonPath = 'python3';  // Mac uses system Python
+      pythonPath = 'python3';
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_audio_qso_server_Q12.py');
     } else {
-      pythonPath = 'python3';  // Linux uses system Python
+      pythonPath = 'python3';
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_audio_qso_server_Q12.py');
     }
   }
 
-  console.log('=== Starting Python Backend ===');
-  console.log('Mode:', isDev ? 'Development' : 'Production');
-  console.log('Platform:', process.platform);
-  console.log('Python path:', pythonPath);
-  console.log('Script path:', scriptPath);
-  console.log('Resources path:', process.resourcesPath);
+  logToConsole(`Python path: ${pythonPath}`);
+  logToConsole(`Script path: ${scriptPath}`);
+  
+  // Check if files exist
+  if (process.platform === 'win32' && !isDev) {
+    const pythonExists = fs.existsSync(pythonPath);
+    const scriptExists = fs.existsSync(scriptPath);
+    logToConsole(`Python exists: ${pythonExists}`);
+    logToConsole(`Script exists: ${scriptExists}`);
+    
+    if (!pythonExists) {
+      dialog.showErrorBox('Python Not Found', `Python executable not found at: ${pythonPath}`);
+      return;
+    }
+    if (!scriptExists) {
+      dialog.showErrorBox('Script Not Found', `Python script not found at: ${scriptPath}`);
+      return;
+    }
+  }
 
-  pythonProcess = spawn(pythonPath, [scriptPath], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env }
-  });
+  logToConsole('Spawning Python process...');
+  
+  try {
+    pythonProcess = spawn(pythonPath, [scriptPath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env }
+    });
 
-  pythonProcess.stdout.on('data', (data) => {
-    console.log('[Python]', data.toString().trim());
-  });
+    logToConsole('Python process spawned successfully');
 
-  pythonProcess.stderr.on('data', (data) => {
-    console.error('[Python Error]', data.toString().trim());
-  });
+    pythonProcess.stdout.on('data', (data) => {
+      const msg = `[Python STDOUT] ${data.toString().trim()}`;
+      logToConsole(msg);
+    });
 
-  pythonProcess.on('close', (code) => {
-    console.log('Python process exited with code', code);
-  });
+    pythonProcess.stderr.on('data', (data) => {
+      const msg = `[Python STDERR] ${data.toString().trim()}`;
+      logToConsole(msg);
+    });
 
-  pythonProcess.on('error', (err) => {
-    console.error('Failed to start Python:', err);
-  });
+    pythonProcess.on('close', (code) => {
+      logToConsole(`Python process exited with code ${code}`);
+    });
+
+    pythonProcess.on('error', (err) => {
+      logToConsole(`Failed to start Python: ${err.message}`);
+      dialog.showErrorBox('Python Error', `Failed to start Python backend: ${err.message}\n\nPath: ${pythonPath}`);
+    });
+  } catch (err) {
+    logToConsole(`Exception spawning Python: ${err.message}`);
+    dialog.showErrorBox('Exception', `Exception starting Python: ${err.message}`);
+  }
 }
 
 app.whenReady().then(createWindow);
