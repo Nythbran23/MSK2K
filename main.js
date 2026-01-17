@@ -48,17 +48,17 @@ function startPythonBackend() {
   
   if (isDev) {
     pythonPath = process.platform === 'win32' ? 'python' : 'python3';
-    scriptPath = path.join(__dirname, 'python', 'msk2k_audio_qso_server_Q12.py');
+    scriptPath = path.join(__dirname, 'python', 'msk2k_server_wrapper.py');
   } else {
     if (process.platform === 'win32') {
       pythonPath = path.join(process.resourcesPath, 'python', 'python.exe');
-      scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_audio_qso_server_Q12.py');
+      scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     } else if (process.platform === 'darwin') {
       pythonPath = 'python3';
-      scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_audio_qso_server_Q12.py');
+      scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     } else {
       pythonPath = 'python3';
-      scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_audio_qso_server_Q12.py');
+      scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     }
   }
 
