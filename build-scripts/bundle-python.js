@@ -93,9 +93,9 @@ async function bundleMacPython(appOutDir) {
   console.log('Extracting Python.framework...');
   const extractDir = path.join(resourcesDir, 'python-extract');
   
-  // Clean up extract dir if it exists
-  if (await fs.pathExists(extractDir)) {
-    await fs.remove(extractDir);
+  // Clean up extract dir if it exists (use sync to ensure it's done before pkgutil)
+  if (fs.pathExistsSync(extractDir)) {
+    fs.removeSync(extractDir);
   }
   
   await fs.ensureDir(extractDir);
