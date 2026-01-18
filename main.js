@@ -53,14 +53,17 @@ function startPythonBackend() {
     pythonPath = process.platform === 'win32' ? 'python' : 'python3';
     scriptPath = path.join(__dirname, 'python', 'msk2k_server_wrapper.py');
   } else {
+    // Production: use bundled Python for all platforms
     if (process.platform === 'win32') {
       pythonPath = path.join(process.resourcesPath, 'python', 'python.exe');
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     } else if (process.platform === 'darwin') {
-      pythonPath = 'python3';
+      // macOS: use bundled Python in venv
+      pythonPath = path.join(process.resourcesPath, 'python', 'bin', 'python3');
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     } else {
-      pythonPath = 'python3';
+      // Linux: use bundled Python in venv
+      pythonPath = path.join(process.resourcesPath, 'python', 'bin', 'python3');
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     }
   }
@@ -68,8 +71,8 @@ function startPythonBackend() {
   logToConsole(`Python path: ${pythonPath}`);
   logToConsole(`Script path: ${scriptPath}`);
   
-  // Check if files exist
-  if (process.platform === 'win32' && !isDev) {
+  // Check if files exist (production only)
+  if (!isDev) {
     const pythonExists = fs.existsSync(pythonPath);
     const scriptExists = fs.existsSync(scriptPath);
     logToConsole(`Python exists: ${pythonExists}`);

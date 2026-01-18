@@ -4,14 +4,19 @@ const { execSync } = require('child_process');
 
 module.exports = async function(context) {
   const platform = context.electronPlatformName;
+  const appOutDir = context.appOutDir;
+  
+  console.log(`\n=== Bundling Python for ${platform} ===\n`);
   
   if (platform === 'win32') {
-    console.log('\n=== Bundling Python for Windows ===\n');
-    await bundleWindowsPython(context.appOutDir);
-    console.log('\n=== Windows Python complete ===\n');
-  } else {
-    console.log(`\n${platform} - Skipping Python bundling (uses system Python)\n`);
+    await bundleWindowsPython(appOutDir);
+  } else if (platform === 'darwin') {
+    await bundleMacPython(appOutDir);
+  } else if (platform === 'linux') {
+    await bundleLinuxPython(appOutDir);
   }
+  
+  console.log(`\n=== ${platform} Python bundling complete ===\n`);
 };
 
 async function bundleWindowsPython(appOutDir) {
@@ -24,7 +29,7 @@ async function bundleWindowsPython(appOutDir) {
   const pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-embed-amd64.zip`;
   const zipPath = path.join(resourcesDir, 'python-embed.zip');
   
-  console.log('Downloading Python...');
+  console.log('Downloading Python for Windows...');
   execSync(`curl -L -o "${zipPath}" "${pythonUrl}"`, { stdio: 'inherit' });
   
   execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${pythonDir}' -Force"`, { stdio: 'inherit' });
@@ -50,4 +55,66 @@ async function bundleWindowsPython(appOutDir) {
     path.join(resourcesDir, 'python-app'),
     { filter: (src) => !src.includes('__pycache__') && !src.includes('.pyc') }
   );
+}
+
+async function bundleMacPython(appOutDir) {
+  const resourcesDir = path.join(appOutDir, '..', 'Resources');
+  const pythonDir = path.join(resourcesDir, 'python');
+  
+  await fs.ensureDir(pythonDir);
+
+  console.log('Creating Python virtual environment for macOS...');
+  
+  // Create venv
+  execSync('python3 -m venv ' + pythonDir, { stdio: 'inherit' });
+  
+  const pythonBin = path.join(pythonDir, 'bin', 'python3');
+  const pipBin = path.join(pythonDir, 'bin', 'pip3');
+  
+  console.log('Upgrading pip...');
+  execSync(`"${pythonBin}" -m pip install --upgrade pip`, { stdio: 'inherit' });
+  
+  console.log('Installing dependencies...');
+  const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');
+  execSync(`"${pipBin}" install -r "${requirementsPath}"`, { stdio: 'inherit' });
+  
+  console.log('Copying Python app...');
+  await fs.copy(
+    path.join(__dirname, '..', 'python'),
+    path.join(resourcesDir, 'python-app'),
+    { filter: (src) => !src.includes('__pycache__') && !src.includes('.pyc') }
+  );
+  
+  console.log('macOS Python bundle created successfully');
+}
+
+async function bundleLinuxPython(appOutDir) {
+  const resourcesDir = path.join(appOutDir, 'resources');
+  const pythonDir = path.join(resourcesDir, 'python');
+  
+  await fs.ensureDir(pythonDir);
+
+  console.log('Creating Python virtual environment for Linux...');
+  
+  // Create venv
+  execSync('python3 -m venv ' + pythonDir, { stdio: 'inherit' });
+  
+  const pythonBin = path.join(pythonDir, 'bin', 'python3');
+  const pipBin = path.join(pythonDir, 'bin', 'pip3');
+  
+  console.log('Upgrading pip...');
+  execSync(`"${pythonBin}" -m pip install --upgrade pip`, { stdio: 'inherit' });
+  
+  console.log('Installing dependencies...');
+  const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');
+  execSync(`"${pipBin}" install -r "${requirementsPath}"`, { stdio: 'inherit' });
+  
+  console.log('Copying Python app...');
+  await fs.copy(
+    path.join(__dirname, '..', 'python'),
+    path.join(resourcesDir, 'python-app'),
+    { filter: (src) => !src.includes('__pycache__') && !src.includes('.pyc') }
+  );
+  
+  console.log('Linux Python bundle created successfully');
 }
