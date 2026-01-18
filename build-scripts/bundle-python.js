@@ -80,19 +80,46 @@ async function bundleMacPython(appOutDir) {
   console.log(`Mac resourcesDir: ${resourcesDir}`);
   
   const pythonDir = path.join(resourcesDir, 'python');
-  
   await fs.ensureDir(pythonDir);
 
-  console.log('Creating Python virtual environment for macOS...');
+  // Download standalone Python
+  const pythonVersion = '3.11.9';
+  const pythonUrl = `https://www.python.org/ftp/python/${pythonVersion}/python-${pythonVersion}-macos11.pkg`;
+  const pkgPath = path.join(resourcesDir, 'python-installer.pkg');
   
-  // Create venv with --copies to avoid symlinks to system Python
-  execSync('python3 -m venv --copies ' + pythonDir, { stdio: 'inherit' });
+  console.log(`Downloading Python ${pythonVersion} for macOS...`);
+  execSync(`curl -L -o "${pkgPath}" "${pythonUrl}"`, { stdio: 'inherit' });
   
-  const pythonBin = path.join(pythonDir, 'bin', 'python3');
-  const pipBin = path.join(pythonDir, 'bin', 'pip3');
+  console.log('Extracting Python.framework...');
+  const extractDir = path.join(resourcesDir, 'python-extract');
+  
+  // Clean up extract dir if it exists
+  if (await fs.pathExists(extractDir)) {
+    await fs.remove(extractDir);
+  }
+  
+  await fs.ensureDir(extractDir);
+  
+  // Extract the pkg
+  execSync(`pkgutil --expand "${pkgPath}" "${extractDir}"`, { stdio: 'inherit' });
+  
+  // Extract the Python framework payload
+  const payloadPath = path.join(extractDir, 'Python_Framework.pkg', 'Payload');
+  execSync(`tar -xzf "${payloadPath}" -C "${pythonDir}"`, { stdio: 'inherit' });
+  
+  // Clean up
+  await fs.remove(extractDir);
+  await fs.remove(pkgPath);
+
+  const pythonBin = path.join(pythonDir, 'Library', 'Frameworks', 'Python.framework', 'Versions', '3.11', 'bin', 'python3');
+  const pipBin = path.join(pythonDir, 'Library', 'Frameworks', 'Python.framework', 'Versions', '3.11', 'bin', 'pip3');
   
   console.log('Upgrading pip...');
   execSync(`"${pythonBin}" -m pip install --upgrade pip`, { stdio: 'inherit' });
+  
+  console.log('Installing dependencies...');
+  const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');
+  execSync(`"${pipBin}" install -r "${requirementsPath}"`, { stdio: 'inherit' });
   
   console.log('Installing dependencies...');
   const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');

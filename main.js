@@ -58,8 +58,8 @@ function startPythonBackend() {
       pythonPath = path.join(process.resourcesPath, 'python', 'python.exe');
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     } else if (process.platform === 'darwin') {
-      // macOS: use bundled Python venv
-      pythonPath = path.join(process.resourcesPath, 'python', 'bin', 'python3');
+      // macOS: use bundled Python.framework
+      pythonPath = path.join(process.resourcesPath, 'python', 'Library', 'Frameworks', 'Python.framework', 'Versions', '3.11', 'bin', 'python3');
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     } else {
       // Linux: use bundled Python in venv
