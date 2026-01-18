@@ -121,10 +121,6 @@ async function bundleMacPython(appOutDir) {
   const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');
   execSync(`"${pipBin}" install -r "${requirementsPath}"`, { stdio: 'inherit' });
   
-  console.log('Installing dependencies...');
-  const requirementsPath = path.join(__dirname, '..', 'python', 'requirements.txt');
-  execSync(`"${pipBin}" install -r "${requirementsPath}"`, { stdio: 'inherit' });
-  
   console.log('Copying Python app...');
   await fs.copy(
     path.join(__dirname, '..', 'python'),
