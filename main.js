@@ -58,7 +58,7 @@ function startPythonBackend() {
       pythonPath = path.join(process.resourcesPath, 'python', 'python.exe');
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     } else if (process.platform === 'darwin') {
-      // macOS: use bundled Python in venv
+      // macOS: use bundled Python venv
       pythonPath = path.join(process.resourcesPath, 'python', 'bin', 'python3');
       scriptPath = path.join(process.resourcesPath, 'python-app', 'msk2k_server_wrapper.py');
     } else {
