@@ -85,8 +85,8 @@ async function bundleMacPython(appOutDir) {
 
   console.log('Creating Python virtual environment for macOS...');
   
-  // Create venv
-  execSync('python3 -m venv ' + pythonDir, { stdio: 'inherit' });
+  // Create venv with --copies to avoid symlinks to system Python
+  execSync('python3 -m venv --copies ' + pythonDir, { stdio: 'inherit' });
   
   const pythonBin = path.join(pythonDir, 'bin', 'python3');
   const pipBin = path.join(pythonDir, 'bin', 'pip3');
@@ -116,8 +116,8 @@ async function bundleLinuxPython(appOutDir) {
 
   console.log('Creating Python virtual environment for Linux...');
   
-  // Create venv
-  execSync('python3 -m venv ' + pythonDir, { stdio: 'inherit' });
+  // Create venv with --copies to avoid symlinks to system Python
+  execSync('python3 -m venv --copies ' + pythonDir, { stdio: 'inherit' });
   
   const pythonBin = path.join(pythonDir, 'bin', 'python3');
   const pipBin = path.join(pythonDir, 'bin', 'pip3');
