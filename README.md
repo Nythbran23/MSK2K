@@ -1,8 +1,7 @@
 # MSK2K
 **A Next-Generation Meteor Scatter Mode for Weak Signal DX**
 
-![MSK2K Screenshot](screenshot.jpg)
-*(Note: Add a screenshot of your UI here)*
+![MSK2K Screenshot](screenshot.png)
 
 ## Overview
 **MSK2K** is a specialized digital mode designed for amateur radio meteor scatter (MS) communication. [cite_start]It is a modern, high-performance evolution of the **PSK2k** protocol originally developed by **Klaus von der Heide (DJ5HG)**[cite: 1, 2].
