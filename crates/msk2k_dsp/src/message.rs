@@ -1,0 +1,479 @@
+// crates/msk2k_dsp/src/message.rs
+use anyhow::{anyhow, Result};
+
+use crate::callsign::CallsignCodec;
+
+/// Message content types
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageContent {
+    /// Format 1: Full message (CQ, text, reports)
+    Format1 { text: String },
+    /// Format 2: Short message (R-reports, RR, 73)
+    Format2 { message_type: String },
+}
+
+/// A decoded message
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub format: u8,
+    pub from_call: String,
+    pub to_call: Option<String>,
+    pub content: MessageContent,
+    pub text: String,
+}
+
+impl Message {
+    // =========================================================================
+    // FORMAT-2 ENCODING/DECODING (matching Python implementation exactly)
+    // =========================================================================
+
+    /// Create a Format-2 message
+    pub fn format2(from_call: &str, to_call: &str, message_type: &str) -> Result<Self> {
+        Ok(Self {
+            format: 2,
+            from_call: from_call.to_string(),
+            to_call: Some(to_call.to_string()),
+            content: MessageContent::Format2 {
+                message_type: message_type.to_string(),
+            },
+            text: message_type.to_string(),
+        })
+    }
+
+    /// Encode Format-2 message to 18 bits
+    /// 
+    /// Structure (matching Python exactly):
+    /// - Bits 0-2: 3-bit message code (R26, R27, R28, R29, R36, R37, RR, 73)
+    /// - Bits 3-17: 15-bit parity (generated from message + their_call + my_call)
+    pub fn to_format2_bits(&self, codec: &CallsignCodec) -> Result<Vec<i32>> {
+        let MessageContent::Format2 { message_type } = &self.content else {
+            return Err(anyhow!("Not a Format-2 message"));
+        };
+
+        // Map message type to 3-bit code (matching Python line 2261-2271)
+        let message_code: u8 = match message_type.as_str() {
+            "R26" => 0b000,
+            "R27" => 0b001,
+            "R28" => 0b010,
+            "R29" => 0b011,
+            "R36" => 0b100,
+            "R37" => 0b101,
+            "RR" | "RRR" => 0b110,
+            "73" => 0b111,
+            _ => return Err(anyhow!("Invalid Format-2 message type: {}", message_type)),
+        };
+
+        // Convert to 3 bits
+        let mut message_bits = Vec::with_capacity(3);
+        for i in (0..3).rev() {
+            message_bits.push(((message_code >> i) & 1) as i32);
+        }
+
+        // Get callsign encodings (54 bits each)
+        let my_call_bits = codec.encode_callsign(&self.from_call).map_err(|e| anyhow!(e))?;
+        let their_call_bits = codec.encode_callsign(
+            self.to_call
+                .as_ref()
+                .ok_or_else(|| anyhow!("Format-2 requires to_call"))?,
+        ).map_err(|e| anyhow!(e))?;
+
+        // Generate 15 parity bits from: [message(3) + their_call(54) + my_call(54)]
+        // This matches Python line 2278: parity_source = np.concatenate([message_bits, their_call_bits, my_call_bits])
+        let mut parity_source = message_bits.clone();
+        parity_source.extend(&their_call_bits);
+        parity_source.extend(&my_call_bits);
+
+        let parity = codec.generate_parity(&parity_source, 32749, 15);
+
+        // Combine: 3 message bits + 15 parity bits = 18 bits
+        let mut info_bits = message_bits;
+        info_bits.extend(parity);
+
+        Ok(info_bits)
+    }
+
+    /// Decode Format-2 message from 18 bits
+    /// 
+    /// Args:
+    /// - bits: 18 information bits (3 message + 15 parity)
+    /// - addr_bits: 49-bit address (contains TO callsign)
+    /// - my_call: Receiver's callsign (for parity verification)
+    /// - their_call: Expected transmitter's callsign (for parity verification)
+    pub fn from_format2_bits(
+        codec: &CallsignCodec,
+        bits: &[i32],
+        addr_bits: &[i32],
+        my_call: &str,
+        their_call: &str,
+    ) -> Result<Self> {
+        if bits.len() != 18 {
+            return Err(anyhow!("Format-2 requires 18 bits, got {}", bits.len()));
+        }
+
+        // Split: first 3 bits = message code, last 15 bits = parity
+        let message_bits = &bits[0..3];
+        let received_parity = &bits[3..18];
+
+        // Decode 3-bit message code
+        let message_code = (message_bits[0] << 2) | (message_bits[1] << 1) | message_bits[2];
+
+        let message_type = match message_code {
+            0b000 => "R26",
+            0b001 => "R27",
+            0b010 => "R28",
+            0b011 => "R29",
+            0b100 => "R36",
+            0b101 => "R37",
+            0b110 => "RR",
+            0b111 => "73",
+            _ => return Err(anyhow!("Invalid Format-2 message code: {}", message_code)),
+        };
+
+        // Decode TO callsign from address
+        let to_callsign = codec.decode_private_address(addr_bits);
+        if to_callsign == "ERROR" || to_callsign == "UNKNOWN" {
+            return Err(anyhow!("Cannot decode TO callsign from address"));
+        }
+
+        // Verify parity (matching Python line 2133-2148)
+        // Parity was generated by TRANSMITTER as: [message, their_call, my_call]
+        // From receiver perspective: their_call = us (my_call), my_call = them (their_call)
+        let my_call_bits = codec.encode_callsign(my_call).map_err(|e| anyhow!(e))?;
+        let their_call_bits = codec.encode_callsign(their_call).map_err(|e| anyhow!(e))?;
+
+        let mut parity_source = message_bits.to_vec();
+        parity_source.extend(&my_call_bits);
+        parity_source.extend(&their_call_bits);
+
+        let expected_parity = codec.generate_parity(&parity_source, 32749, 15);
+
+        // Check parity match
+        if received_parity != expected_parity {
+            return Err(anyhow!("Format-2 parity check failed"));
+        }
+
+        Ok(Self {
+            format: 2,
+            from_call: their_call.to_string(),
+            to_call: Some(my_call.to_string()),
+            content: MessageContent::Format2 {
+                message_type: message_type.to_string(),
+            },
+            text: message_type.to_string(),
+        })
+    }
+
+    // =========================================================================
+    // FORMAT-1 ENCODING/DECODING (keeping your existing code)
+    // =========================================================================
+
+    /// Create a Format-1 CQ message
+    pub fn cq(callsign: &str) -> Result<Self> {
+        Ok(Self {
+            format: 1,
+            from_call: callsign.to_string(),
+            to_call: None,
+            content: MessageContent::Format1 {
+                text: format!("CQ de {}", callsign),
+            },
+            text: format!("CQ de {}", callsign),
+        })
+    }
+
+    /// Create a Format-1 call with optional report
+    pub fn call(from: &str, to: &str, report: Option<&str>) -> Result<Self> {
+        let text = if let Some(r) = report {
+            format!("{} de {} {}", to, from, r)
+        } else {
+            format!("{} de {}", to, from)
+        };
+
+        Ok(Self {
+            format: 1,
+            from_call: from.to_string(),
+            to_call: Some(to.to_string()),
+            content: MessageContent::Format1 { text: text.clone() },
+            text,
+        })
+    }
+
+    /// Create a Format-1 cold call (call without report)
+    pub fn cold_call(from: &str, to: &str) -> Result<Self> {
+        Self::call(from, to, None)
+    }
+
+    /// Create a Format-1 call with report
+    pub fn call_with_report(from: &str, to: &str, report: &str) -> Result<Self> {
+        Self::call(from, to, Some(report))
+    }
+
+    /// Create a Format-2 RR (Roger Roger) message
+    pub fn roger_roger(from: &str, to: &str) -> Result<Self> {
+        Self::format2(from, to, "RR")
+    }
+
+    /// Create a Format-2 73 message
+    pub fn seventy_three(from: &str, to: &str) -> Result<Self> {
+        Self::format2(from, to, "73")
+    }
+
+    /// Encode Format-1 message to 71 bits
+    pub fn to_format1_bits(&self, codec: &CallsignCodec) -> Result<(Vec<i32>, Vec<i32>)> {
+        let MessageContent::Format1 { .. } = &self.content else {
+            return Err(anyhow!("Not a Format-1 message"));
+        };
+
+        // Encode callsign (54 bits)
+        let call_bits = codec.encode_callsign(&self.from_call).map_err(|e| anyhow!(e))?;
+
+        // Determine message type and report bits
+        let (type_bits, report_bits) = if self.to_call.is_none() {
+            // General CQ: type = 01
+            (vec![0, 1], vec![])
+        } else {
+            // Private call with optional report
+            let report = self.extract_report();
+            let report_bits = match report {
+                None => vec![0, 0, 0],      // 000 = No report (cold call)
+                Some(26) => vec![1, 1, 0],  // 110 = 26 (weak signal)
+                Some(27) => vec![0, 0, 1],  // 001 = 27
+                Some(28) => vec![0, 1, 0],  // 010 = 28
+                Some(29) => vec![0, 1, 1],  // 011 = 29
+                Some(36) => vec![1, 0, 0],  // 100 = 36
+                Some(37) => vec![1, 0, 1],  // 101 = 37
+                // 111 = reserved
+                _ => {
+                    log::warn!("Invalid report code: {:?}, defaulting to no report", report);
+                    vec![0, 0, 0]  // Default to no report
+                }
+            };
+            (vec![], report_bits)
+        };
+
+        // Build info bits
+        let mut info_bits = Vec::new();
+        if self.to_call.is_none() {
+            // General: callsign(54) + type(2)
+            info_bits.extend(&call_bits);
+            info_bits.extend(&type_bits);
+        } else {
+            // Private: report(3) + callsign(54)
+            info_bits.extend(&report_bits);
+            info_bits.extend(&call_bits);
+        }
+
+        // Generate parity
+        let parity = if self.to_call.is_none() {
+            // General: 15 bits with r=32749
+            codec.generate_parity(&info_bits, 32749, 15)
+        } else {
+            // Private: 14 bits with r=16381, includes their_call
+            let their_call_bits = codec.encode_callsign(self.to_call.as_ref().unwrap()).map_err(|e| anyhow!(e))?;
+            let mut parity_source = info_bits.clone();
+            parity_source.extend(&their_call_bits);
+            codec.generate_parity(&parity_source, 16381, 14)
+        };
+
+        info_bits.extend(&parity);
+
+        // Also return address bits
+        let addr_bits = if let Some(ref to) = self.to_call {
+            let full_addr = codec.generate_private_address(to).map_err(|e| anyhow!(e))?;
+            full_addr[..49].to_vec()  // ✅ Truncate to 49 bits
+        } else {
+            vec![1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1,
+                 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1]
+        };
+
+        Ok((info_bits, addr_bits))
+    }
+
+    /// Decode Format-1 from 71 bits
+    pub fn from_format1_bits(
+        codec: &CallsignCodec,
+        bits: &[i32],
+        addr_bits: &[i32],
+        is_general: bool,
+        my_call: Option<&str>,
+    ) -> Result<Self> {
+        if bits.len() != 71 {
+            return Err(anyhow!("Format-1 requires 71 bits, got {}", bits.len()));
+        }
+
+        if is_general {
+            // General CQ: callsign(54) + type(2) + parity(15)
+            let callsign = codec.decode_callsign(&bits[0..54]);
+            
+            if callsign == "ERROR" || callsign.len() < 3 {
+                return Err(anyhow!("Invalid callsign: {}", callsign));
+            }
+
+            // Verify parity
+            let expected_parity = codec.generate_parity(&bits[0..56], 32749, 15);
+            
+            if bits[56..71] != expected_parity {
+                return Err(anyhow!("Parity check failed for general CQ (callsign: {})", callsign));
+            }
+
+            Ok(Self {
+                format: 1,
+                from_call: callsign.clone(),
+                to_call: None,
+                content: MessageContent::Format1 {
+                    text: format!("CQ de {}", callsign),
+                },
+                text: format!("CQ de {}", callsign),
+            })
+        } else {
+            // Private: report(3) + callsign(54) + parity(14)
+            let report_bits = &bits[0..3];
+            let report = match (report_bits[0], report_bits[1], report_bits[2]) {
+                (0, 0, 0) => None,      // 000 = No report (cold call)
+                (0, 0, 1) => Some(27),  // 001 = 27
+                (0, 1, 0) => Some(28),  // 010 = 28
+                (0, 1, 1) => Some(29),  // 011 = 29
+                (1, 0, 0) => Some(36),  // 100 = 36
+                (1, 0, 1) => Some(37),  // 101 = 37
+                (1, 1, 0) => Some(26),  // 110 = 26 (weak signal)
+                (1, 1, 1) => None,      // 111 = reserved
+                _ => None,
+            };
+
+            let callsign = codec.decode_callsign(&bits[3..57]);
+            if callsign == "ERROR" || callsign.len() < 3 {
+                return Err(anyhow!("Invalid callsign: {}", callsign));
+            }
+
+            // For private messages, the address identifies the recipient.
+            // We match by generating our own private address and comparing.
+            let to_call = if let Some(my) = my_call {
+                if !my.is_empty() {
+                    let my_addr = codec.generate_private_address(my).map_err(|e| anyhow!(e))?;
+                    if addr_bits.len() >= 49 && my_addr.len() >= 49 && addr_bits[..49] == my_addr[..49] {
+                        my.to_string()
+                    } else {
+                        return Err(anyhow!("Private message not addressed to us"));
+                    }
+                } else {
+                    return Err(anyhow!("No my_call set for private message"));
+                }
+            } else {
+                return Err(anyhow!("No my_call available for private address check"));
+            };
+
+            // Verify parity
+            let their_call_bits = codec.encode_callsign(&to_call).map_err(|e| anyhow!(e))?;
+            let mut parity_source = bits[0..57].to_vec();
+            parity_source.extend(&their_call_bits);
+            let expected_parity = codec.generate_parity(&parity_source, 16381, 14);
+            if bits[57..71] != expected_parity {
+                return Err(anyhow!("Parity check failed for private call"));
+            }
+
+            let text = if let Some(r) = report {
+                format!("{} de {} {}", to_call, callsign, r)
+            } else {
+                format!("{} de {}", to_call, callsign)
+            };
+
+            Ok(Self {
+                format: 1,
+                from_call: callsign,
+                to_call: Some(to_call),
+                content: MessageContent::Format1 { text: text.clone() },
+                text,
+            })
+        }
+    }
+
+    // Helper to extract report from text
+    fn extract_report(&self) -> Option<i32> {
+        let text = &self.text;
+        // Check for all valid report codes
+        if text.contains("26") {
+            Some(26)
+        } else if text.contains("27") {
+            Some(27)
+        } else if text.contains("28") {
+            Some(28)
+        } else if text.contains("29") {
+            Some(29)
+        } else if text.contains("36") {
+            Some(36)
+        } else if text.contains("37") {
+            Some(37)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format2_message_construction() {
+        let msg = Message::format2("GW4WND", "SM2CEW", "R27").unwrap();
+        assert_eq!(msg.format, 2);
+        assert_eq!(msg.from_call, "GW4WND");
+        assert_eq!(msg.to_call, Some("SM2CEW".to_string()));
+        assert_eq!(msg.text, "R27");
+    }
+
+    #[test]
+    fn test_format2_encoding() {
+        let codec = CallsignCodec::new();
+        let msg = Message::format2("GW4WND", "SM2CEW", "RR").unwrap();
+        
+        let bits = msg.to_format2_bits(&codec).unwrap();
+        assert_eq!(bits.len(), 18, "Should produce 18 bits");
+        
+        // First 3 bits should be message code
+        // RR = 0b110
+        assert_eq!(bits[0], 1);
+        assert_eq!(bits[1], 1);
+        assert_eq!(bits[2], 0);
+        
+        // Remaining 15 bits are parity
+        assert_eq!(bits.len(), 18);
+    }
+
+    #[test]
+    fn test_format2_round_trip() {
+        let codec = CallsignCodec::new();
+        
+        // Create and encode message
+        let msg = Message::format2("GW4WND", "SM2CEW", "73").unwrap();
+        let bits = msg.to_format2_bits(&codec).unwrap();
+        
+        // Get address
+        let addr_bits = codec.generate_private_address("SM2CEW").unwrap();
+        
+        // Decode (simulating receiver)
+        let decoded = Message::from_format2_bits(
+            &codec,
+            &bits,
+            &addr_bits[..49],
+            "SM2CEW", // receiver (my_call)
+            "GW4WND", // transmitter (their_call)
+        )
+        .unwrap();
+        
+        assert_eq!(decoded.format, 2);
+        assert_eq!(decoded.from_call, "GW4WND");
+        assert_eq!(decoded.text, "73");
+    }
+
+    #[test]
+    fn test_all_format2_message_types() {
+        let codec = CallsignCodec::new();
+        let types = vec!["R26", "R27", "R28", "R29", "R36", "R37", "RR", "73"];
+        
+        for msg_type in types {
+            let msg = Message::format2("GW4WND", "SM2CEW", msg_type).unwrap();
+            let bits = msg.to_format2_bits(&codec).unwrap();
+            assert_eq!(bits.len(), 18, "Failed for message type {}", msg_type);
+        }
+    }
+}

@@ -1,0 +1,47 @@
+[package]
+name = "msk2k"
+version = "0.1.0"
+edition = "2021"
+authors = ["Roger Banks <GW4WND>"]
+description = "MSK2K digital mode transceiver for amateur radio"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "msk2k"
+path = "src/main.rs"
+
+[[bin]]
+name = "fft_test"
+path = "src/bin/fft_test.rs"
+required-features = ["fft_test"]
+
+[dependencies]
+# Local crates
+msk2k_audio = { path = "crates/msk2k_audio" }
+msk2k_dsp   = { path = "crates/msk2k_dsp" }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+dirs = "5.0"
+anyhow = "1.0"
+tokio = { version = "1.41", features = ["full"] }
+eframe = "0.29"
+egui = "0.29"
+log = "0.4"
+env_logger = "0.11"
+cpal = "0.15"
+clap = { version = "4.5", features = ["derive"] }
+chrono = "0.4"
+
+[workspace]
+members = [
+    "crates/msk2k_dsp",
+    "crates/msk2k_audio",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+default-run = "msk2k"

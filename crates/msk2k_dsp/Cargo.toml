@@ -1,0 +1,16 @@
+[package]
+name = "msk2k_dsp"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "test_accumulation"
+path = "src/bin/test_accumulation.rs"
+
+[dependencies]
+rustfft = "6.1"
+num-complex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4.29"
+anyhow = "1.0.100"
