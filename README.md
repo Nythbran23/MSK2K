@@ -4,7 +4,7 @@
 ![MSK2K Screenshot](screenshot.png)
 
 ## Overview
-**MSK2K** is a specialized digital mode designed for amateur radio meteor scatter (MS) communication. It is a modern, high-performance evolution of the **PSK2k** protocol originally developed by **Klaus von der Heide (DJ5HG).
+**MSK2K** is a specialized digital mode designed for amateur radio meteor scatter (MS) communication. It is a modern, high-performance evolution of the **PSK2k** protocol originally developed by Klaus von der Heide (DJ5HG).
 
 While building upon the robust coding theoretical foundation of PSK2k, MSK2K introduces significant optimizations:
 * **Modulation:** Transitioned from BPSK to **MSK (Minimum Shift Keying)** for constant envelope efficiency, allowing for higher average power output.
