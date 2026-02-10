@@ -36,6 +36,13 @@ pub enum UiCmd {
         my_call: String,
         auto_slots: bool,
     },
+
+    StartCqWithGrid { 
+        my_call: String, 
+        grid_indices: [usize; 4], 
+        auto_slots: bool 
+    },
+    
     CallStation {
         my_call: String,
         their_call: String,
@@ -43,9 +50,9 @@ pub enum UiCmd {
     AnswerCq {
         my_call: String,
         their_call: String,
-        // 🟢 FIX: Changed from String to i16 to match QsoEngine and UI
-        rpt: i16, 
+        rpt: i16,
         rx_slot: Option<u8>,
+        grid: Option<String>, // 🟢 NEW: Grid from CQ
     },
     ColdCall {
         my_call: String,
@@ -98,6 +105,7 @@ pub enum UiEvent {
     },
     TheirCallChanged {
         callsign: String,
+        grid: Option<String>, // 🟢 NEW: Grid if available
     },
     ConfigLoaded {
         my_call: String,

@@ -1,0 +1,225 @@
+use std::{fs, path::PathBuf};
+use serde::Deserialize;
+use std::collections::HashMap;
+
+#[derive(Debug, Deserialize)]
+struct Fmt1Vector {
+    name: Option<String>,
+    seed: Option<u64>,
+    sync_bits: Vec<i32>,
+    addr_bits: Vec<i32>,
+    poly1_bits: Vec<i32>,
+    poly2_bits: Vec<i32>,
+    packet_bits: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Fmt2Vector {
+    name: Option<String>,
+    seed: Option<u64>,
+    sync_bits: Vec<i32>,
+    addr_bits: Vec<i32>,
+    poly_keys: Vec<String>,
+    poly_len: i32,
+    poly_bits_dict: HashMap<String, Vec<i32>>,
+    packet_bits: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Fmt1EncodeVector {
+    name: Option<String>,
+    seed: Option<u64>,
+    info_len: i32,
+    info_bits: Vec<i32>,
+    sync_bits: Vec<i32>,
+    addr_bits: Vec<i32>,
+    poly1_bits: Vec<i32>,
+    poly2_bits: Vec<i32>,
+    packet_bits: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Fmt2EncodeVector {
+    name: Option<String>,
+    seed: Option<u64>,
+    info_len: i32,
+    info_bits: Vec<i32>,
+    sync_bits: Vec<i32>,
+    addr_bits: Vec<i32>,
+    poly_keys: Vec<String>,
+    poly_len: i32,
+    poly_bits_dict: HashMap<String, Vec<i32>>,
+    packet_bits: Vec<i32>,
+}
+
+fn vectors_path(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("vectors")
+        .join(rel)
+}
+
+fn load_json<T: for<'de> Deserialize<'de>>(rel: &str) -> T {
+    let p = vectors_path(rel);
+    let s = fs::read_to_string(&p).unwrap_or_else(|e| {
+        panic!("read json file {:?}: {}", p, e);
+    });
+    serde_json::from_str(&s).unwrap_or_else(|e| {
+        panic!("parse json {:?}: {}", p, e);
+    })
+}
+
+fn run_fmt1_vector(rel: &str) {
+    let v: Fmt1Vector = load_json(rel);
+
+    let rust_packet = msk2k_dsp::fmt1::interleave_format1(
+        &v.sync_bits,
+        &v.addr_bits,
+        &v.poly1_bits,
+        &v.poly2_bits,
+    );
+
+    assert_eq!(
+        rust_packet.len(),
+        v.packet_bits.len(),
+        "length mismatch for {}",
+        rel
+    );
+
+    assert_eq!(
+        rust_packet,
+        v.packet_bits,
+        "packet mismatch for {} (vector {:?}, seed {:?})",
+        rel,
+        v.name,
+        v.seed
+    );
+}
+
+fn run_fmt2_vector(rel: &str) {
+    let v: Fmt2Vector = load_json(rel);
+
+    assert_eq!(v.poly_len, 18, "unexpected poly_len in {}", rel);
+    assert_eq!(v.poly_keys.len(), 9, "unexpected poly_keys count in {}", rel);
+
+    // NOTE: fmt2 expects &HashMap<String, Vec<i32>>
+    let rust_packet = msk2k_dsp::fmt2::interleave_format2(
+        &v.sync_bits,
+        &v.addr_bits,
+        &v.poly_bits_dict,
+    );
+
+    assert_eq!(
+        rust_packet.len(),
+        v.packet_bits.len(),
+        "length mismatch for {}",
+        rel
+    );
+
+    assert_eq!(
+        rust_packet,
+        v.packet_bits,
+        "packet mismatch for {} (vector {:?}, seed {:?})",
+        rel,
+        v.name,
+        v.seed
+    );
+}
+
+fn run_fmt1_encode_vector(rel: &str) {
+    let v: Fmt1EncodeVector = load_json(rel);
+
+    // Basic sanity: expected interleave inputs
+    assert_eq!(v.sync_bits.len(), 43, "unexpected sync len in {}", rel);
+    assert_eq!(v.addr_bits.len(), 49, "unexpected addr len in {}", rel);
+
+    // --- CHANGE THIS if your encoder lives elsewhere ---
+    // Expected: returns (poly1_bits[83], poly2_bits[83])
+    let (p1, p2) = msk2k_dsp::fec::encode_fmt1(&v.info_bits);
+    // ---------------------------------------------------
+
+    assert_eq!(p1, v.poly1_bits, "fmt1 poly1 mismatch for {}", rel);
+    assert_eq!(p2, v.poly2_bits, "fmt1 poly2 mismatch for {}", rel);
+
+    // Optional: also confirm the final interleaved packet matches
+    let rust_packet = msk2k_dsp::fmt1::interleave_format1(
+        &v.sync_bits,
+        &v.addr_bits,
+        &p1,
+        &p2,
+    );
+
+    assert_eq!(rust_packet, v.packet_bits, "fmt1 packet mismatch for {}", rel);
+}
+
+fn run_fmt2_encode_vector(rel: &str) {
+    let v: Fmt2EncodeVector = load_json(rel);
+
+    assert_eq!(v.sync_bits.len(), 43, "unexpected sync len in {}", rel);
+    assert_eq!(v.addr_bits.len(), 49, "unexpected addr len in {}", rel);
+    assert_eq!(v.poly_len, 18, "unexpected poly_len in {}", rel);
+    assert_eq!(v.poly_keys.len(), 9, "unexpected poly_keys count in {}", rel);
+
+    // --- CHANGE THIS if your encoder lives elsewhere ---
+    // Expected: returns HashMap<String, Vec<i32>> with keys Pa..Pi each len 18
+    let poly_map = msk2k_dsp::fec::encode_fmt2(&v.info_bits);
+    // ---------------------------------------------------
+
+    // Check keys + values match Python
+    for k in &v.poly_keys {
+        assert!(poly_map.contains_key(k), "missing key {} in {}", k, rel);
+        let got = poly_map.get(k).unwrap();
+        let exp = v.poly_bits_dict.get(k).unwrap();
+        assert_eq!(got, exp, "fmt2 poly {} mismatch for {}", k, rel);
+    }
+
+    // Optional: also confirm the final interleaved packet matches
+    let rust_packet = msk2k_dsp::fmt2::interleave_format2(
+        &v.sync_bits,
+        &v.addr_bits,
+        &poly_map,
+    );
+
+    assert_eq!(rust_packet, v.packet_bits, "fmt2 packet mismatch for {}", rel);
+}
+
+#[test]
+fn fmt1_interleave_matches_python_pattern() {
+    run_fmt1_vector("fmt1_pattern.json");
+}
+
+#[test]
+fn fmt1_interleave_matches_python_prng_12345() {
+    run_fmt1_vector("fmt1_prng_12345.json");
+}
+
+#[test]
+fn fmt2_interleave_matches_python_pattern() {
+    run_fmt2_vector("fmt2_pattern.json");
+}
+
+#[test]
+fn fmt2_interleave_matches_python_prng_12345() {
+    run_fmt2_vector("fmt2_prng_12345.json");
+}
+
+#[test]
+fn fmt1_encode_matches_python_pattern() {
+    run_fmt1_encode_vector("fmt1_encode_pattern.json");
+}
+
+#[test]
+fn fmt1_encode_matches_python_prng_12345() {
+    run_fmt1_encode_vector("fmt1_encode_prng_12345.json");
+}
+
+#[test]
+fn fmt2_encode_matches_python_pattern() {
+    run_fmt2_encode_vector("fmt2_encode_pattern.json");
+}
+
+#[test]
+fn fmt2_encode_matches_python_prng_12345() {
+    run_fmt2_encode_vector("fmt2_encode_prng_12345.json");
+}
+

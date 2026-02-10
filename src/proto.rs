@@ -13,16 +13,15 @@ pub enum Format {
     Fmt2,  // Short messages: R-reports, RR, 73
 }
 
+/// 🟢 NEW: Container for the output of render_payload.
+/// This allows us to send either a standard string or raw pre-packed bits.
+#[derive(Debug, Clone)]
+pub enum Rendered {
+    Text(String),
+    Bits(Vec<i32>),
+}
+
 /// Logical payload types for QSO protocol.
-/// 
-/// Region-1 ladder:
-/// 1. CQ de A                    (Fmt1, general)
-/// 2. A de B 27                  (Fmt1, private - call with report)
-/// 3. B de A 27                  (Fmt1, private - report back)
-/// 4. R27                        (Fmt2 - roger + report)
-/// 5. RR                         (Fmt2 - roger roger)
-/// 6. 73                         (Fmt2 - end)
-/// 7. 73                         (Fmt2 - end)
 #[derive(Debug, Clone, PartialEq)]
 pub enum Payload {
     /// CQ call (Format-1, general address)
@@ -30,6 +29,12 @@ pub enum Payload {
         from: String,
         qtf_deg: Option<i16>,
         period: Option<u32>,
+    },
+
+    /// 🟢 Grid CQ: Holds the raw 56-bit vector generated in runtime.rs
+    CqWithGrid {
+        from: String,
+        grid_bits: Vec<i32>,
     },
     
     /// Cold call - calling a station without report (Format-1, private)
@@ -39,7 +44,6 @@ pub enum Payload {
     },
     
     /// Call with report (Format-1, private)
-    /// Used when answering CQ or sending initial report
     CallWithReport {
         from: String,
         to: String,
@@ -47,7 +51,6 @@ pub enum Payload {
     },
     
     /// Report only (Format-2)
-    /// This is the "R27" style message
     Report {
         from: String,
         to: String,
@@ -55,7 +58,6 @@ pub enum Payload {
     },
     
     /// Roger + Report (Format-2)
-    /// Acknowledges receipt and sends report back
     RReport {
         from: String,
         to: String,
@@ -83,10 +85,10 @@ pub enum Payload {
 }
 
 impl Payload {
-    /// Get the "from" callsign
     pub fn from_call(&self) -> &str {
         match self {
             Payload::Cq { from, .. } => from,
+            Payload::CqWithGrid { from, .. } => from,
             Payload::Call { from, .. } => from,
             Payload::CallWithReport { from, .. } => from,
             Payload::Report { from, .. } => from,
@@ -97,7 +99,6 @@ impl Payload {
         }
     }
     
-    /// Get the "to" callsign if present
     pub fn to_call(&self) -> Option<&str> {
         match self {
             Payload::Cq { .. } => None,
@@ -108,13 +109,14 @@ impl Payload {
             Payload::Rr { to, .. } => Some(to),
             Payload::SeventyThree { to, .. } => Some(to),
             Payload::Text { to, .. } => to.as_deref(),
+            Payload::CqWithGrid { .. } => None,
         }
     }
     
-    /// Determine the format for this payload
     pub fn format(&self) -> Format {
         match self {
             Payload::Cq { .. } => Format::Fmt1,
+            Payload::CqWithGrid { .. } => Format::Fmt1,
             Payload::Call { .. } => Format::Fmt1,
             Payload::CallWithReport { .. } => Format::Fmt1,
             Payload::Report { .. } => Format::Fmt2,
@@ -141,73 +143,48 @@ pub struct RxEnvelope {
 pub struct TxEnvelope {
     pub payload: Payload,
     pub format: Format,
-    /// Pre-rendered text for TX (what actually gets sent to modem)
     pub raw: String,
 }
 
-/// Render a payload to the text string expected by the TX modem.
-/// 
-/// The modem tx.rs expects specific formats:
-/// - CQ: "CQ de CALL"
-/// - Call: "TO de FROM"
-/// - Call+Report: "TO de FROM 27"
-/// - Format-2 short: "R27", "RR", "73" (modem adds callsigns)
-pub fn render_payload(payload: &Payload) -> String {
+/// 🟢 UPDATED: Render a payload to a Rendered enum.
+/// This allows the modem to accept raw bits for Grid mode, bypassing the standard string encoder.
+// src/proto.rs
+
+pub fn render_payload(payload: &Payload) -> Rendered {
     match payload {
+        Payload::CqWithGrid { from: _, grid_bits } => {
+            // 🟢 Send the 56-bit Source Encoded block.
+            // This contains the Call, Grid, and Signature.
+            // It is NOT yet FEC encoded or Interleaved.
+            Rendered::Bits(grid_bits.clone()) 
+        }
+
         Payload::Cq { from, .. } => {
-            format!("CQ de {}", from)
+            // Standard text. The modem will perform Source Encoding (Base-37) on this.
+            Rendered::Text(format!("CQ de {}", from))
         }
         
-        Payload::Call { from, to } => {
-            format!("{} de {}", to, from)
-        }
-        
-        Payload::CallWithReport { from, to, rpt } => {
-            format!("{} de {} {}", to, from, rpt)
-        }
-        
-        // Format-2 messages: just the short code
-        // The TX modem will add callsigns from context
-        Payload::Report { rpt, .. } => {
-            format!("R{}", rpt)
-        }
-        
-        Payload::RReport { rpt, .. } => {
-            format!("R{}", rpt)
-        }
-        
-        Payload::Rr { .. } => {
-            "RR".to_string()
-        }
-        
-        Payload::SeventyThree { .. } => {
-            "73".to_string()
-        }
-        
+        // ... rest of match arms (Text variants)
+        Payload::Call { from, to } => Rendered::Text(format!("{} de {}", to, from)),
+        Payload::CallWithReport { from, to, rpt } => Rendered::Text(format!("{} de {} {}", to, from, rpt)),
+        Payload::Report { rpt, .. } => Rendered::Text(format!("R{}", rpt)),
+        Payload::RReport { rpt, .. } => Rendered::Text(format!("R{}", rpt)),
+        Payload::Rr { .. } => Rendered::Text("RR".to_string()),
+        Payload::SeventyThree { .. } => Rendered::Text("73".to_string()),
         Payload::Text { from, to, text } => {
-            if let Some(to) = to {
-                format!("{} de {} {}", to, from, text)
-            } else {
-                format!("CQ de {} {}", from, text)
-            }
+             if let Some(to) = to { Rendered::Text(format!("{} de {} {}", to, from, text)) }
+             else { Rendered::Text(format!("CQ de {} {}", from, text)) }
         }
     }
 }
 
-/// Convert a DSP Message to a protocol Payload.
-/// 
-/// This bridges the gap between what the decoder produces and what
-/// the QSO state machine expects.
 pub fn message_to_payload(msg: &Message) -> Option<Payload> {
     let from = msg.from_call.clone();
     let to = msg.to_call.clone();
     
     match msg.format {
         1 => {
-            // Format-1: CQ or Call (with optional report)
             let text = &msg.text;
-            
-            // Check for CQ
             if text.to_uppercase().starts_with("CQ") {
                 return Some(Payload::Cq {
                     from,
@@ -215,28 +192,18 @@ pub fn message_to_payload(msg: &Message) -> Option<Payload> {
                     period: None,
                 });
             }
-            
-            // Check for call with report
-            // Format: "TO de FROM RPT" where RPT is like "27"
             if let Some(to) = to {
-                // Try to extract report from text
                 let rpt = extract_report_from_text(text);
-                
                 if let Some(rpt) = rpt {
                     return Some(Payload::CallWithReport { from, to, rpt });
                 } else {
                     return Some(Payload::Call { from, to });
                 }
             }
-            
-            // Fallback to text
             Some(Payload::Text { from, to, text: text.clone() })
         }
-        
         2 => {
-            // Format-2: Short messages
-            let to = to?; // Format-2 always has a destination
-            
+            let to = to?;
             match msg.text.as_str() {
                 "R26" => Some(Payload::RReport { from, to, rpt: 26 }),
                 "R27" => Some(Payload::RReport { from, to, rpt: 27 }),
@@ -246,48 +213,28 @@ pub fn message_to_payload(msg: &Message) -> Option<Payload> {
                 "R37" => Some(Payload::RReport { from, to, rpt: 37 }),
                 "RR" => Some(Payload::Rr { from, to }),
                 "73" => Some(Payload::SeventyThree { from, to }),
-                _ => {
-                    log::warn!("Unknown Format-2 message type: {}", msg.text);
-                    None
-                }
+                _ => None
             }
         }
-        
-        _ => {
-            log::warn!("Unknown message format: {}", msg.format);
-            None
-        }
+        _ => None
     }
 }
 
-/// Extract numeric report from text like "SM2CEW de DJ5HG 27"
 fn extract_report_from_text(text: &str) -> Option<i16> {
-    // Valid reports: 26, 27, 28, 29, 36, 37
     let valid_reports = [26i16, 27, 28, 29, 36, 37];
-    
     for word in text.split_whitespace().rev() {
-        // Skip if it looks like a callsign (contains letters and numbers)
         if word.chars().any(|c| c.is_alphabetic()) && word.chars().any(|c| c.is_numeric()) {
             continue;
         }
-        
-        // Try to parse as number
         if let Ok(num) = word.parse::<i16>() {
-            if valid_reports.contains(&num) {
-                return Some(num);
-            }
+            if valid_reports.contains(&num) { return Some(num); }
         }
-        
-        // Check for R-prefix style (shouldn't be in Format-1 but handle it)
         if word.starts_with('R') && word.len() == 3 {
             if let Ok(num) = word[1..].parse::<i16>() {
-                if valid_reports.contains(&num) {
-                    return Some(num);
-                }
+                if valid_reports.contains(&num) { return Some(num); }
             }
         }
     }
-    
     None
 }
 

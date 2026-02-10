@@ -30,6 +30,8 @@ pub struct QsoRecord {
     pub rst_sent: String,
     /// RST received
     pub rst_rcvd: String,
+    /// 🟢 NEW: Their Maidenhead grid square (e.g., "JO54")
+    pub gridsquare: Option<String>,
 }
 
 impl QsoRecord {
@@ -43,6 +45,7 @@ impl QsoRecord {
         freq: Option<f64>,
         rst_sent: i16,
         rst_rcvd: Option<i16>,
+        gridsquare: Option<String>, // 🟢 NEW
     ) -> Self {
         let start_dt = Utc.timestamp_millis_opt(start_utc_ms).unwrap();
         let end_dt = Utc.timestamp_millis_opt(end_utc_ms).unwrap();
@@ -58,6 +61,7 @@ impl QsoRecord {
             mode: "MSK144".to_string(),
             rst_sent: rst_sent.to_string(),
             rst_rcvd: rst_rcvd.map(|r| r.to_string()).unwrap_or_default(),
+            gridsquare, // 🟢 NEW
         }
     }
     
@@ -78,6 +82,10 @@ impl QsoRecord {
         parts.push(adif_field("RST_SENT", &self.rst_sent));
         if !self.rst_rcvd.is_empty() {
             parts.push(adif_field("RST_RCVD", &self.rst_rcvd));
+        }
+        // 🟢 NEW: Add gridsquare if present
+        if let Some(ref grid) = self.gridsquare {
+            parts.push(adif_field("GRIDSQUARE", grid));
         }
         parts.push("<EOR>".to_string());
         
@@ -232,6 +240,7 @@ fn parse_adif_record(line: &str) -> Option<QsoRecord> {
     let rst_sent = get_field("RST_SENT").unwrap_or_default();
     let rst_rcvd = get_field("RST_RCVD").unwrap_or_default();
     let operator = get_field("OPERATOR").unwrap_or_default();
+    let gridsquare = get_field("GRIDSQUARE"); // 🟢 NEW
     
     Some(QsoRecord {
         call,
@@ -244,6 +253,7 @@ fn parse_adif_record(line: &str) -> Option<QsoRecord> {
         mode,
         rst_sent,
         rst_rcvd,
+        gridsquare, // 🟢 NEW
     })
 }
 
@@ -264,6 +274,7 @@ mod tests {
             mode: "MSK144".to_string(),
             rst_sent: "28".to_string(),
             rst_rcvd: "27".to_string(),
+            gridsquare: Some("JO54".to_string()), // 🟢 NEW
         };
         
         let adif = record.to_adif();
@@ -272,6 +283,7 @@ mod tests {
         assert!(adif.contains("<TIME_ON:6>051200"));
         assert!(adif.contains("<BAND:2>2M"));
         assert!(adif.contains("<MODE:6>MSK144"));
+        assert!(adif.contains("<GRIDSQUARE:4>JO54")); // 🟢 NEW
         assert!(adif.contains("<EOR>"));
     }
     

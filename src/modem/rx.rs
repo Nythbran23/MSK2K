@@ -1,5 +1,6 @@
 // src/modem/rx.rs
 
+use log::{debug, info};
 use tokio::sync::mpsc;
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,7 +8,9 @@ use cpal::traits::DeviceTrait;
 
 use msk2k_audio::{AudioConfig, AudioInputBuilder, DeviceManager};
 use msk2k_dsp::message::Message;
-use msk2k_dsp::rx::{PhaseDemodState, MatrixSyncExtractor, PacketCandidate};
+use msk2k_dsp::rx::{PhaseDemodState, MatrixSyncExtractor, PacketCandidate, RxSync};
+use msk2k_dsp::decode::{decode_packet_soft, is_general_addr};
+use msk2k_dsp::callsign::CallsignCodec;
 use crate::engine::accumulator::Accumulator;
 
 #[derive(Debug, Clone)]
@@ -43,7 +46,6 @@ pub struct RxDecoded {
     pub utc_ms: i64,
     pub rx_slot: u8,
     pub is_private: bool,
-    // 🟢 NEW: Flag to track source
     pub is_accumulated: bool, 
 }
 
@@ -53,7 +55,6 @@ pub async fn run_receiver(
     mut stop_rx: mpsc::UnboundedReceiver<()>,
     mut config_rx: mpsc::UnboundedReceiver<RxConfigUpdate>,
 ) {
-    // ─── SETUP SIMULATION ───
     let env_noise = env::var("MSK2K_NOISE").ok().and_then(|v| v.parse::<f32>().ok());
     let env_burst = env::var("MSK2K_BURST").ok().and_then(|v| v.parse::<u8>().ok());
 
@@ -63,24 +64,15 @@ pub async fn run_receiver(
     if env_noise.is_some() || env_burst.is_some() {
         sim_noise_floor = env_noise.unwrap_or(0.0);
         let burst_mode = env_burst.unwrap_or(0);
-        log::warn!("\n!!! SIM ACTIVE: Noise={} Burst={} !!!\n", sim_noise_floor, burst_mode);
         channel_sim = Some(ChannelSimulator::new(12345, burst_mode));
     }
 
-    let manager = match DeviceManager::new() {
-        Ok(m) => m,
-        Err(e) => { log::error!("[RX] Failed to create DeviceManager: {}", e); return; }
-    };
-
+    let manager = DeviceManager::new().unwrap_or_else(|e| panic!("DeviceManager failed: {}", e));
     let device = if let Some(ref name) = cfg.input_device {
-        match manager.get_input_device(Some(name)) {
-            Ok(d) => d,
-            Err(_) => manager.default_input_device().unwrap(),
-        }
+        manager.get_input_device(Some(name)).unwrap_or_else(|_| manager.default_input_device().unwrap())
     } else {
         manager.default_input_device().unwrap()
     };
-
     log::info!("[RX] Opening Device: {}", device.name().unwrap_or_default());
 
     let audio_cfg = AudioConfig::new(cfg.sample_rate, 1, cfg.buffer_size);
@@ -88,28 +80,30 @@ pub async fn run_receiver(
         Ok(ai) => ai,
         Err(e) => { log::error!("[RX] Failed to build AudioInput: {:?}", e); return; }
     };
-
     let (audio_chunk_tx, mut audio_chunk_rx) = mpsc::unbounded_channel::<Vec<f32>>();
     if let Err(e) = audio_input.start(audio_chunk_tx) {
         log::error!("[RX] Failed to start audio capture: {:?}", e);
         return;
     }
 
-    // DSP STATES
     let mut demod = PhaseDemodState::new();
     let mut extractor = MatrixSyncExtractor::new();
-    
-    // Accumulator & Buffer (Live)
     let mut accumulator = Accumulator::new(&cfg.my_call, cfg.their_call.clone());
     let mut max_retain_samples = (cfg.sample_rate as u64 * (cfg.slot_len_ms as u64 + 1000) / 1000) as usize;
     let mut retained_audio: Vec<f32> = Vec::with_capacity(max_retain_samples);
-    
     let mut pending_accumulation = false;
+    
+    // 🔍 DIAGNOSTIC: Audio level monitoring
+    let mut diag_sample_count: u64 = 0;
+    let mut diag_sum_sq: f64 = 0.0;
+    let mut diag_peak: f32 = 0.0;
+    let mut diag_chunk_count: u64 = 0;
+    let mut diag_candidate_count: u64 = 0;
+    let mut diag_decode_count: u64 = 0;
 
     loop {
         tokio::select! {
             _ = stop_rx.recv() => { break; }
-
             Some(update) = config_rx.recv() => {
                 match update {
                     RxConfigUpdate::TheirCall(tc) => {
@@ -128,29 +122,17 @@ pub async fn run_receiver(
                     },
                     RxConfigUpdate::EndOfPeriod => {
                         pending_accumulation = true;
-                        
-                        // 1. INTELLIGENT CATCH-UP (Drain to Accumulator)
-                        let mut rescued_packets = 0;
                         while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
                             for s in &mut chunk { *s *= 0.5; }
-                            
                             retained_audio.extend_from_slice(&chunk);
-                            
                             let phases = demod.push_audio(&chunk);
                             if !phases.is_empty() {
                                 let candidates = extractor.push_phase(&phases);
-                                for candidate in candidates {
+                                for candidate in candidates { 
                                     accumulator.add(candidate);
                                 }
                             }
-                            rescued_packets += 1;
                         }
-                        
-                        if rescued_packets > 0 {
-                            log::warn!("[RX] ⏩ Fast-Forwarded {} packets into Accumulator (Skipped Live Decode)", rescued_packets);
-                        }
-
-                        // 2. RESET DSP STATE
                         demod = PhaseDemodState::new();
                         extractor = MatrixSyncExtractor::new();
                     },
@@ -165,28 +147,48 @@ pub async fn run_receiver(
                         let period_ms = cfg.slot_len_ms as u64;
                         let current_rx_slot = ((utc_ms as u64 / period_ms) % 2) as u8;
 
-                        // 1. SIMULATION
+                        // 🔍 DIAGNOSTIC: Measure audio levels BEFORE any processing
+                        for s in &chunk {
+                            diag_sum_sq += (*s as f64) * (*s as f64);
+                            let abs = s.abs();
+                            if abs > diag_peak { diag_peak = abs; }
+                        }
+                        diag_sample_count += chunk.len() as u64;
+                        diag_chunk_count += 1;
+                        
+                        // Log every ~5 seconds (approx 240 chunks at 48kHz/1024)
+                        if diag_chunk_count % 240 == 0 {
+                            let rms = if diag_sample_count > 0 {
+                                (diag_sum_sq / diag_sample_count as f64).sqrt()
+                            } else { 0.0 };
+                            log::info!("🔊 RX AUDIO: rms={:.6}, peak={:.4}, samples={}, chunks={}, candidates={}, decodes={}",
+                                rms, diag_peak, diag_sample_count, diag_chunk_count,
+                                diag_candidate_count, diag_decode_count);
+                            // Reset for next window
+                            diag_sample_count = 0;
+                            diag_sum_sq = 0.0;
+                            diag_peak = 0.0;
+                            diag_candidate_count = 0;
+                            diag_decode_count = 0;
+                        }
+
                         if let Some(sim) = &mut channel_sim {
                             for s in &mut chunk {
                                 let gain = sim.next_gain();
-                                let signal = *s * gain;
-                                let noise = if sim_noise_floor > 0.0 {
-                                    sim.rng.cheap_noise() * sim_noise_floor
-                                } else { 0.0 };
-                                *s = signal + noise;
+                                *s = (*s * gain) + (sim.rng.cheap_noise() * sim_noise_floor);
                             }
                         }
-
-                        // 2. AUTO-LEVEL
                         for s in &mut chunk { *s *= 0.5; }
 
-                        // 3. FAST PATH (Real-Time)
                         let phases = demod.push_audio(&chunk);
                         if !phases.is_empty() {
                             let candidates = extractor.push_phase(&phases);
                             for candidate in &candidates {
+                                diag_candidate_count += 1; // 🔍 DIAGNOSTIC
+                                // 🟢 RESTORED: Only add to accumulator if Live Decode FAILS
                                 if let Some(decoded) = decode_candidate(candidate, &cfg, utc_ms, current_rx_slot) {
-                                    log::info!("\u{2705} Fast Decode: '{}' (corr={:.3} slot={})", decoded.msg.text, candidate.sync.correlation, current_rx_slot);
+                                    diag_decode_count += 1; // 🔍 DIAGNOSTIC
+                                    log::info!("[LIVE]  ✅ '{}'", decoded.msg.text);
                                     let _ = decoded_tx.send(decoded);
                                 } else {
                                     accumulator.add(candidate.clone());
@@ -194,55 +196,25 @@ pub async fn run_receiver(
                             }
                         }
 
-                        // 4. ACCUMULATION (Background Hand-off)
                         if pending_accumulation {
-                            // Swap & Spawn Logic
-                            let mut next_accumulator = Accumulator::new(&cfg.my_call, cfg.their_call.clone());
-                            let mut next_retained = Vec::with_capacity(max_retain_samples);
+                            // 🟢 LOG: Debug level (hidden by default) to stop "192" spam
+                            if accumulator.candidate_count() > 0 {
+                                debug!("[ACCUM] Processing {} candidates...", accumulator.candidate_count());
+                            }
+
+                            if let Some(msg) = accumulator.process() {
+                                let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
+                                let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: current_rx_slot, is_private, is_accumulated: true };
+                                let _ = decoded_tx.send(decoded);
+                            }
                             
-                            std::mem::swap(&mut accumulator, &mut next_accumulator);
-                            let prev_acc = next_accumulator;
-
-                            std::mem::swap(&mut retained_audio, &mut next_retained);
-                            
-                            let tx_clone = decoded_tx.clone();
-                            let capture_utc = utc_ms;
-                            let slot_len = cfg.slot_len_ms as i64;
-
-                            tokio::task::spawn_blocking(move || {
-                                // Silent unless success
-                                let prev_slot_mid_ms = capture_utc - (slot_len / 2);
-                                let prev_slot_idx = ((prev_slot_mid_ms as u64 / slot_len as u64) % 2) as u8;
-
-                                let mut acc = prev_acc; 
-                                if let Some(msg) = acc.process() {
-                                    let is_private = msg.format == 2 || (
-                                        msg.format == 1 && 
-                                        msg.to_call.as_deref().unwrap_or("CQ") != "CQ"
-                                    );
-
-                                    let decoded = RxDecoded { 
-                                        msg, 
-                                        snr: None, 
-                                        utc_ms: prev_slot_mid_ms, 
-                                        rx_slot: prev_slot_idx,
-                                        is_private,
-                                        is_accumulated: true, // 🟢 MARK AS ACCUMULATED
-                                    };
-                                    let _ = tx_clone.send(decoded);
-                                    log::info!("[ACCUM] 🎯 Match Found!");
-                                }
-                            });
-
+                            // 🟢 CRITICAL: Reset accumulator
+                            accumulator.clear();
+                            retained_audio.clear();
                             pending_accumulation = false;
                         }
-
-                        // 5. COPY TO PERSISTENT BUFFER
-                        retained_audio.extend_from_slice(&chunk);
-                        if retained_audio.len() > max_retain_samples {
-                            let overflow = retained_audio.len() - max_retain_samples;
-                            retained_audio.drain(0..overflow);
-                        }
+                        
+                        if retained_audio.len() > max_retain_samples { retained_audio.clear(); }
                     }
                     None => break,
                 }
@@ -253,10 +225,6 @@ pub async fn run_receiver(
 }
 
 fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, rx_slot: u8) -> Option<RxDecoded> {
-    use msk2k_dsp::decode::{decode_packet_soft, is_general_addr};
-    use msk2k_dsp::callsign::CallsignCodec;
-    use msk2k_dsp::rx::RxSync;
-
     let sync = &candidate.sync;
     if sync.sync_bits < 35 && sync.correlation < 0.40 { return None; }
 
@@ -271,30 +239,51 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
         };
 
         if let Some(pkt) = decode_packet_soft(&candidate.packet_soft, &ts) {
-            let is_general = is_general_addr(&pkt.addr_bits);
-            let msg_res = if pkt.format == 1 {
-                Message::from_format1_bits(&codec, &pkt.info_bits, &pkt.addr_bits, is_general, Some(&cfg.my_call))
-            } else if pkt.format == 2 {
-                if cfg.my_call.is_empty() { continue; }
-                Message::from_format2_bits(&codec, &pkt.info_bits, &pkt.addr_bits, &cfg.my_call, cfg.their_call.as_deref().unwrap_or(""))
-            } else { continue; };
+            let mut msg_res = None;
 
-            if let Ok(msg) = msg_res {
-                if msg.from_call == cfg.my_call { return None; }
+            // 🟢 FORMAT 1: Try both Grid and Standard decode paths
+            if pkt.format == 1 {
+                let is_general = is_general_addr(&pkt.addr_bits);
+                // Type field at bit positions 54,55 (0-indexed)
+                // [1,1] = Type 11 (CQ+Grid), [0,1] = Type 01 (Standard CQ/directed)
+                let b54 = pkt.info_bits.get(54).unwrap_or(&0);
+                let b55 = pkt.info_bits.get(55).unwrap_or(&0);
                 
-                let is_private_msg = pkt.format == 2 || (
-                    pkt.format == 1 && 
-                    !is_general && 
-                    msg.to_call.as_deref().unwrap_or("CQ") != "CQ"
-                );
+                // 🟢 TRY 1: If type bits suggest Grid CQ, try grid decode first
+                if is_general && *b54 == 1 && *b55 == 1 {
+                    if let Ok(grid_text) = codec.decode_cq_with_grid(&pkt.info_bits) {
+                        let parts: Vec<&str> = grid_text.split_whitespace().collect();
+                        let clean_call = parts.get(0).unwrap_or(&"?").to_string();
+                        let grid = parts.get(1).unwrap_or(&"");
+                        let ui_text = format!("CQ {} {}", clean_call, grid);
+                        
+                        msg_res = Some(Ok(Message {
+                            from_call: clean_call,
+                            to_call: None,
+                            text: ui_text.clone(),
+                            content: msk2k_dsp::message::MessageContent::Format1 { text: ui_text },
+                            format: 1,
+                        }));
+                    }
+                }
+                
+                // 🟢 TRY 2: If grid decode didn't produce a result, try standard decode
+                // This handles: standard CQ, directed calls, AND grid CQ with decode errors
+                if msg_res.is_none() {
+                    msg_res = Some(Message::from_format1_bits(&codec, &pkt.info_bits, &pkt.addr_bits, is_general, Some(&cfg.my_call)));
+                }
+            } 
+            // 🟢 FORMAT 2: Short messages
+            else if pkt.format == 2 {
+                msg_res = Some(Message::from_format2_bits(&codec, &pkt.info_bits, &pkt.addr_bits, &cfg.my_call, cfg.their_call.as_deref().unwrap_or("")));
+            }
 
-                return Some(RxDecoded {
-                    msg,
-                    snr: Some(sync.correlation),
-                    utc_ms,
-                    rx_slot,
-                    is_private: is_private_msg,
-                    is_accumulated: false, // 🟢 MARK AS FAST PATH
+            if let Some(Ok(msg)) = msg_res {
+                if msg.from_call == cfg.my_call { continue; }
+                let is_private_msg = pkt.format == 2 || (pkt.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
+                return Some(RxDecoded { 
+                    msg, snr: Some(sync.correlation), utc_ms, rx_slot, 
+                    is_private: is_private_msg, is_accumulated: false 
                 });
             }
         }
@@ -315,45 +304,21 @@ impl SimpleRng {
         (u - 0.5) * 2.0 
     }
 }
-
 struct ChannelSimulator {
-    rng: SimpleRng,
-    envelope: f32,
-    samples_until_ping: usize,
-    decay_rate: f32,
-    burst_mode: u8,
-    logged_bypass: bool,
+    rng: SimpleRng, envelope: f32, samples_until_ping: usize, decay_rate: f32, burst_mode: u8, logged_bypass: bool,
 }
-
 impl ChannelSimulator {
     fn new(seed: u64, burst_mode: u8) -> Self {
         let rng = SimpleRng::new(seed);
-        let decay = match burst_mode {
-            0 => 1.0,      
-            1 => 0.9995,   
-            _ => 0.99992,  
-        };
+        let decay = match burst_mode { 0 => 1.0, 1 => 0.9995, _ => 0.99992 };
         let start_env = if burst_mode == 0 { 1.0 } else { 0.0 };
         Self { rng, envelope: start_env, samples_until_ping: 48000 * 2, decay_rate: decay, burst_mode, logged_bypass: false }
     }
-
     fn next_gain(&mut self) -> f32 {
-        if self.burst_mode == 0 { 
-            if !self.logged_bypass {
-                log::warn!("[SIM] Burst Logic: BYPASSED (Continuous Mode)");
-                self.logged_bypass = true;
-            }
-            return 1.0; 
-        }
-
+        if self.burst_mode == 0 { if !self.logged_bypass { log::warn!("[SIM] Burst Logic: BYPASSED"); self.logged_bypass = true; } return 1.0; }
         self.envelope *= self.decay_rate;
-        if self.samples_until_ping == 0 {
-            self.envelope = 1.0; 
-            let random_delay = (self.rng.next_u64() % 120000) + 24000; 
-            self.samples_until_ping = random_delay as usize;
-        } else {
-            self.samples_until_ping -= 1;
-        }
+        if self.samples_until_ping == 0 { self.envelope = 1.0; self.samples_until_ping = ((self.rng.next_u64() % 120000) + 24000) as usize; } 
+        else { self.samples_until_ping -= 1; }
         if self.envelope < 0.05 { 0.0 } else { self.envelope }
     }
 }

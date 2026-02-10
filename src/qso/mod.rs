@@ -33,7 +33,7 @@
 pub mod adif;
 
 #[allow(unused_imports)]
-use crate::proto::{render_payload, Format, Payload, RxEnvelope, TxEnvelope};
+use crate::proto::{render_payload, Format, Payload, RxEnvelope, TxEnvelope, Rendered};
 use adif::QsoRecord;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -48,31 +48,14 @@ fn utc_ms_now() -> i64 {
 /// QSO protocol states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QsoState {
-    /// Not active
     Idle,
-    
-    /// Listening for activity (will respond to calls addressed to us)
     Listening,
-    
-    /// Calling CQ, waiting for someone to answer
     CallingCq,
-    
-    /// Calling a specific station (cold call, no report yet)
     CallingStn,
-    
-    /// Sending report (Format-1), waiting for R-report back
     SendingReport,
-    
-    /// Sending R-report (Format-2), waiting for RR
     SendingRReport,
-    
-    /// Sending RR (Format-2), waiting for 73
     SendingRr,
-    
-    /// Sending 73 repeatedly (up to 5 times)
     Sending73,
-    
-    /// QSO successfully completed
     Done,
 }
 
@@ -95,90 +78,47 @@ impl std::fmt::Display for QsoState {
 /// User/UI intents that drive state changes
 #[derive(Debug, Clone)]
 pub enum Intent {
-    /// Start listening for calls
     Listen,
-    
-    /// Start calling CQ
     Cq,
-    
-    /// Call a specific station (cold call)
     Call { their: String },
-    
-    /// Answer a CQ (we heard CQ, now call them with report)
-    AnswerCq { their: String, rpt: i16 },
-    
-    /// Abort current QSO
+    AnswerCq { their: String, rpt: i16, grid: Option<String> }, // 🟢 NEW: Grid from CQ
     Abort,
 }
 
 /// Events emitted by the engine
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
-    /// State changed
     StateChanged(QsoState),
-    
-    /// Message received
     Rx(RxEnvelope),
-    
-    /// Message being transmitted
     Tx(TxEnvelope),
-    
-    /// Informational message for UI
     Info(String),
-    
-    /// QSO completed successfully - includes full record for logging
     QsoComplete { 
         their: String,
         record: Option<QsoRecord>,
     },
-    
-    /// Their callsign changed (for UI updates)
-    TheirCallChanged { callsign: String },
+    TheirCallChanged { callsign: String, grid: Option<String> }, // 🟢 NEW: Grid
 }
 
 /// Action to take after processing
 #[derive(Debug, Clone)]
 pub enum Action {
-    /// No action needed
     None,
-    
-    /// Transmit this message
     Transmit(TxEnvelope),
 }
 
 /// The QSO state machine engine
 pub struct QsoEngine {
-    /// Our callsign
     pub my_call: String,
-    
-    /// Their callsign (current QSO partner)
     pub their_call: Option<String>,
-    
-    /// Current state
+    pub their_grid: Option<String>, // 🟢 NEW: Store their grid from CQ
     pub state: QsoState,
-    
-    /// Our report to send (default 27)
     pub my_report: i16,
-    
-    /// Their report (received)
     pub their_report: Option<i16>,
-    
-    /// Last received message
     pub last_rx: Option<RxEnvelope>,
-    
-    /// Last transmitted message
     pub last_tx: Option<TxEnvelope>,
-    
-    /// Counter for repeated transmissions (73s)
     pub tx_repeat_count: u8,
-    
-    /// Maximum repeats before stopping (default 5)
     pub max_repeats: u8,
-    
-    /// QSO start timestamp (UTC milliseconds) - set when QSO begins
     pub qso_start_utc_ms: Option<i64>,
-    
-    /// Band for logging (e.g., "2M", "70CM")
     pub band: String,
 }
 
@@ -187,6 +127,7 @@ impl QsoEngine {
         Self {
             my_call,
             their_call: None,
+            their_grid: None, // 🟢 NEW: No grid initially
             state: QsoState::Idle,
             my_report: 27,
             their_report: None,
@@ -215,7 +156,6 @@ impl QsoEngine {
         self.band = band;
     }
     
-    /// Record QSO start time if not already set
     fn mark_qso_start(&mut self) {
         if self.qso_start_utc_ms.is_none() {
             self.qso_start_utc_ms = Some(utc_ms_now());
@@ -223,7 +163,6 @@ impl QsoEngine {
         }
     }
     
-    /// Create QSO record for logging
     pub fn make_qso_record(&self) -> Option<QsoRecord> {
         let start = self.qso_start_utc_ms?;
         let their = self.their_call.as_ref()?;
@@ -235,13 +174,13 @@ impl QsoEngine {
             start,
             end,
             self.band.clone(),
-            None,  // freq - could add later
+            None,
             self.my_report,
             self.their_report,
+            self.their_grid.clone(), // 🟢 NEW: Include grid in record
         ))
     }
 
-    /// Process a user intent and return action + events
     pub fn on_intent(&mut self, intent: Intent) -> (Action, Vec<EngineEvent>) {
         let mut ev = vec![];
         let mut action = Action::None;
@@ -251,12 +190,10 @@ impl QsoEngine {
                 self.reset_qso();
                 self.transition(QsoState::Listening, &mut ev);
             }
-            
             Intent::Abort => {
                 self.reset_qso();
                 self.transition(QsoState::Idle, &mut ev);
             }
-            
             Intent::Cq => {
                 self.reset_qso();
                 let payload = Payload::Cq {
@@ -267,13 +204,11 @@ impl QsoEngine {
                 action = Action::Transmit(self.make_tx(payload, &mut ev));
                 self.transition(QsoState::CallingCq, &mut ev);
             }
-            
             Intent::Call { their } => {
-                // Scenario 3: Cold call a specific station
                 self.reset_qso();
                 self.their_call = Some(their.clone());
                 self.mark_qso_start();
-                ev.push(EngineEvent::TheirCallChanged { callsign: their.clone() });
+                ev.push(EngineEvent::TheirCallChanged { callsign: their.clone(), grid: None }); // 🟢 No grid for cold calls
                 
                 let payload = Payload::Call {
                     from: self.my_call.clone(),
@@ -282,14 +217,13 @@ impl QsoEngine {
                 action = Action::Transmit(self.make_tx(payload, &mut ev));
                 self.transition(QsoState::CallingStn, &mut ev);
             }
-            
-            Intent::AnswerCq { their, rpt } => {
-                // Answering a CQ: send "THEIR de MY RPT"
+            Intent::AnswerCq { their, rpt, grid } => {
                 self.reset_qso();
                 self.their_call = Some(their.clone());
+                self.their_grid = grid.clone(); // 🟢 NEW: Store grid from CQ
                 self.my_report = rpt;
                 self.mark_qso_start();
-                ev.push(EngineEvent::TheirCallChanged { callsign: their.clone() });
+                ev.push(EngineEvent::TheirCallChanged { callsign: their.clone(), grid }); // 🟢 NEW: Emit grid
                 
                 let payload = Payload::CallWithReport {
                     from: self.my_call.clone(),
@@ -300,35 +234,24 @@ impl QsoEngine {
                 self.transition(QsoState::SendingReport, &mut ev);
             }
         }
-
         (action, ev)
     }
 
-    /// Process a received message and return action + events
     pub fn on_rx(&mut self, rx: RxEnvelope) -> (Action, Vec<EngineEvent>) {
         let mut ev = vec![EngineEvent::Rx(rx.clone())];
         self.last_rx = Some(rx.clone());
-
         let from_call = rx.payload.from_call().to_string();
         
-        // Is this from our current QSO partner?
         let is_from_partner = self.their_call
             .as_ref()
             .map(|their| normalize_call(&from_call) == normalize_call(their))
             .unwrap_or(false);
 
         match (&self.state, &rx.payload) {
-            // =================================================================
-            // LISTENING: Respond to calls addressed to us
-            // =================================================================
             (QsoState::Listening, Payload::Call { from, to }) if self.is_me(to) => {
-                // Someone is cold-calling us (no report)
-                // We respond with our call + report
                 self.their_call = Some(from.clone());
                 self.mark_qso_start();
-                ev.push(EngineEvent::TheirCallChanged { callsign: from.clone() });
-                ev.push(EngineEvent::Info(format!("Cold call from {}", from)));
-                
+                ev.push(EngineEvent::TheirCallChanged { callsign: from.clone(), grid: None }); // 🟢 No grid from calls
                 let payload = Payload::CallWithReport {
                     from: self.my_call.clone(),
                     to: from.clone(),
@@ -338,16 +261,11 @@ impl QsoEngine {
                 self.transition(QsoState::SendingReport, &mut ev);
                 return (action, ev);
             }
-            
             (QsoState::Listening, Payload::CallWithReport { from, to, rpt }) if self.is_me(to) => {
-                // Someone is calling us with a report
                 self.their_call = Some(from.clone());
                 self.their_report = Some(*rpt);
                 self.mark_qso_start();
-                ev.push(EngineEvent::TheirCallChanged { callsign: from.clone() });
-                ev.push(EngineEvent::Info(format!("Call with report {} from {}", rpt, from)));
-                
-                // Send R-report
+                ev.push(EngineEvent::TheirCallChanged { callsign: from.clone(), grid: None }); // 🟢 No grid from calls
                 let payload = Payload::RReport {
                     from: self.my_call.clone(),
                     to: from.clone(),
@@ -357,19 +275,11 @@ impl QsoEngine {
                 self.transition(QsoState::SendingRReport, &mut ev);
                 return (action, ev);
             }
-            
-            // =================================================================
-            // CALLING CQ: Wait for someone to answer
-            // =================================================================
             (QsoState::CallingCq, Payload::CallWithReport { from, to, rpt }) if self.is_me(to) => {
-                // Someone answered our CQ with a report
                 self.their_call = Some(from.clone());
                 self.their_report = Some(*rpt);
                 self.mark_qso_start();
-                ev.push(EngineEvent::TheirCallChanged { callsign: from.clone() });
-                ev.push(EngineEvent::Info(format!("CQ answered by {} with {}", from, rpt)));
-                
-                // Send R-report
+                ev.push(EngineEvent::TheirCallChanged { callsign: from.clone(), grid: None }); // 🟢 No grid from calls
                 let payload = Payload::RReport {
                     from: self.my_call.clone(),
                     to: from.clone(),
@@ -379,17 +289,9 @@ impl QsoEngine {
                 self.transition(QsoState::SendingRReport, &mut ev);
                 return (action, ev);
             }
-            
-            // =================================================================
-            // CALLING STATION (cold call): Wait for their response
-            // =================================================================
             (QsoState::CallingStn, Payload::CallWithReport { from, to, rpt }) 
                 if self.is_me(to) && is_from_partner => {
-                // They responded with a report
                 self.their_report = Some(*rpt);
-                ev.push(EngineEvent::Info(format!("Response from {} with {}", from, rpt)));
-                
-                // Send R-report
                 let payload = Payload::RReport {
                     from: self.my_call.clone(),
                     to: from.clone(),
@@ -399,16 +301,9 @@ impl QsoEngine {
                 self.transition(QsoState::SendingRReport, &mut ev);
                 return (action, ev);
             }
-            
-            // =================================================================
-            // SENDING REPORT: Wait for R-report
-            // =================================================================
             (QsoState::SendingReport, Payload::RReport { from, to, rpt }) 
                 if self.is_me(to) && is_from_partner => {
-                // Got R-report, send RR
                 self.their_report = Some(*rpt);
-                ev.push(EngineEvent::Info(format!("R-report {} from {}", rpt, from)));
-                
                 let payload = Payload::Rr {
                     from: self.my_call.clone(),
                     to: from.clone(),
@@ -417,28 +312,9 @@ impl QsoEngine {
                 self.transition(QsoState::SendingRr, &mut ev);
                 return (action, ev);
             }
-            
-            // Handle repeat of their initial call while we're sending report
-            (QsoState::SendingReport, Payload::CallWithReport { from, to, rpt }) 
-                if self.is_me(to) && is_from_partner => {
-                // They're repeating - just update report if different
-                if self.their_report != Some(*rpt) {
-                    self.their_report = Some(*rpt);
-                }
-                ev.push(EngineEvent::Info(format!("Repeat call from {} with {}", from, rpt)));
-                // Stay in same state, keep sending
-                return (Action::None, ev);
-            }
-            
-            // =================================================================
-            // SENDING R-REPORT: Wait for RR
-            // =================================================================
             (QsoState::SendingRReport, Payload::Rr { from, to }) 
                 if self.is_me(to) && is_from_partner => {
-                // Got RR, send 73
-                ev.push(EngineEvent::Info(format!("RR from {}", from)));
                 self.tx_repeat_count = 0;
-                
                 let payload = Payload::SeventyThree {
                     from: self.my_call.clone(),
                     to: from.clone(),
@@ -447,26 +323,9 @@ impl QsoEngine {
                 self.transition(QsoState::Sending73, &mut ev);
                 return (action, ev);
             }
-            
-            // Handle repeat of their R-report while we're sending R-report
-            (QsoState::SendingRReport, Payload::RReport { from, to, rpt }) 
-                if self.is_me(to) && is_from_partner => {
-                if self.their_report != Some(*rpt) {
-                    self.their_report = Some(*rpt);
-                }
-                ev.push(EngineEvent::Info(format!("Repeat R-report from {}", from)));
-                return (Action::None, ev);
-            }
-            
-            // =================================================================
-            // SENDING RR: Wait for 73
-            // =================================================================
             (QsoState::SendingRr, Payload::SeventyThree { from, to }) 
                 if self.is_me(to) && is_from_partner => {
-                // Got 73, send 73 back
-                ev.push(EngineEvent::Info(format!("73 from {}", from)));
                 self.tx_repeat_count = 0;
-                
                 let payload = Payload::SeventyThree {
                     from: self.my_call.clone(),
                     to: from.clone(),
@@ -475,107 +334,55 @@ impl QsoEngine {
                 self.transition(QsoState::Sending73, &mut ev);
                 return (action, ev);
             }
-            
-            // Handle repeat RR while we're sending RR
-            (QsoState::SendingRr, Payload::Rr { from, to }) 
-                if self.is_me(to) && is_from_partner => {
-                ev.push(EngineEvent::Info(format!("Repeat RR from {}", from)));
-                return (Action::None, ev);
-            }
-            
-            // =================================================================
-            // SENDING 73: Wait for their 73 or timeout
-            // =================================================================
             (QsoState::Sending73, Payload::SeventyThree { from, to }) 
                 if self.is_me(to) && is_from_partner => {
-                // Got their 73 - QSO complete!
                 let their = from.clone();
                 let record = self.make_qso_record();
-                ev.push(EngineEvent::Info(format!("73 from {} - QSO complete!", from)));
                 ev.push(EngineEvent::QsoComplete { their, record });
                 self.transition(QsoState::Done, &mut ev);
                 return (Action::None, ev);
             }
-            
-            // Handle repeat RR while we're sending 73
-            (QsoState::Sending73, Payload::Rr { from, to }) 
-                if self.is_me(to) && is_from_partner => {
-                ev.push(EngineEvent::Info(format!("Repeat RR from {} - continuing 73s", from)));
+            // 🟢 NEW: Early termination - if they're calling CQ to someone else, they've moved on
+            (QsoState::Sending73, Payload::Cq { from, .. }) 
+                if is_from_partner => {
+                ev.push(EngineEvent::Info("Partner calling CQ - terminating QSO early".into()));
+                let their = from.clone();
+                let record = self.make_qso_record();
+                ev.push(EngineEvent::QsoComplete { their, record });
+                self.transition(QsoState::Done, &mut ev);
                 return (Action::None, ev);
             }
-            
-            // =================================================================
-            // Default: No action
-            // =================================================================
+            // 🟢 NEW: Early termination - if they're calling someone specific, they've moved on
+            (QsoState::Sending73, Payload::Call { from, .. }) 
+                if is_from_partner => {
+                ev.push(EngineEvent::Info("Partner calling someone else - terminating QSO early".into()));
+                let their = from.clone();
+                let record = self.make_qso_record();
+                ev.push(EngineEvent::QsoComplete { their, record });
+                self.transition(QsoState::Done, &mut ev);
+                return (Action::None, ev);
+            }
             _ => {}
         }
-
         (Action::None, ev)
     }
 
-    /// Get the next message to transmit based on current state
-    /// Returns None if nothing to send or max repeats exceeded
     pub fn next_tx(&mut self) -> Option<Payload> {
         match self.state {
-            QsoState::CallingCq => {
-                Some(Payload::Cq {
-                    from: self.my_call.clone(),
-                    qtf_deg: None,
-                    period: None,
-                })
-            }
-            
-            QsoState::CallingStn => {
-                let their = self.their_call.as_ref()?;
-                Some(Payload::Call {
-                    from: self.my_call.clone(),
-                    to: their.clone(),
-                })
-            }
-            
-            QsoState::SendingReport => {
-                let their = self.their_call.as_ref()?;
-                Some(Payload::CallWithReport {
-                    from: self.my_call.clone(),
-                    to: their.clone(),
-                    rpt: self.my_report,
-                })
-            }
-            
-            QsoState::SendingRReport => {
-                let their = self.their_call.as_ref()?;
-                Some(Payload::RReport {
-                    from: self.my_call.clone(),
-                    to: their.clone(),
-                    rpt: self.my_report,
-                })
-            }
-            
-            QsoState::SendingRr => {
-                let their = self.their_call.as_ref()?;
-                Some(Payload::Rr {
-                    from: self.my_call.clone(),
-                    to: their.clone(),
-                })
-            }
-            
+            QsoState::CallingCq => Some(Payload::Cq { from: self.my_call.clone(), qtf_deg: None, period: None }),
+            QsoState::CallingStn => Some(Payload::Call { from: self.my_call.clone(), to: self.their_call.clone()? }),
+            QsoState::SendingReport => Some(Payload::CallWithReport { from: self.my_call.clone(), to: self.their_call.clone()?, rpt: self.my_report }),
+            QsoState::SendingRReport => Some(Payload::RReport { from: self.my_call.clone(), to: self.their_call.clone()?, rpt: self.my_report }),
+            QsoState::SendingRr => Some(Payload::Rr { from: self.my_call.clone(), to: self.their_call.clone()? }),
             QsoState::Sending73 => {
                 self.tx_repeat_count += 1;
-                if self.tx_repeat_count > self.max_repeats {
-                    return None;
-                }
-                let their = self.their_call.as_ref()?;
-                Some(Payload::SeventyThree {
-                    from: self.my_call.clone(),
-                    to: their.clone(),
-                })
+                if self.tx_repeat_count > self.max_repeats { return None; }
+                Some(Payload::SeventyThree { from: self.my_call.clone(), to: self.their_call.clone()? })
             }
-            
             _ => None,
         }
     }
     
-    /// Check if we should mark QSO complete (called after tx_repeat check)
     pub fn check_complete(&mut self) -> Option<EngineEvent> {
         if self.state == QsoState::Sending73 && self.tx_repeat_count > self.max_repeats {
             let their = self.their_call.clone().unwrap_or_default();
@@ -592,7 +399,6 @@ impl QsoEngine {
 
     fn transition(&mut self, next: QsoState, ev: &mut Vec<EngineEvent>) {
         if self.state != next {
-            log::info!("QSO: {:?} -> {:?}", self.state, next);
             self.state = next;
             ev.push(EngineEvent::StateChanged(next));
         }
@@ -600,7 +406,13 @@ impl QsoEngine {
 
     fn make_tx(&mut self, payload: Payload, ev: &mut Vec<EngineEvent>) -> TxEnvelope {
         let format = payload.format();
-        let raw = render_payload(&payload);
+        
+        // 🟢 Convert Rendered enum to String for the UI envelope
+        let raw = match render_payload(&payload) {
+            Rendered::Text(s) => s,
+            Rendered::Bits(_) => format!("CQ de {} [GRID]", payload.from_call()),
+        };
+
         let tx = TxEnvelope { payload, format, raw };
         self.last_tx = Some(tx.clone());
         ev.push(EngineEvent::Tx(tx.clone()));
@@ -609,6 +421,7 @@ impl QsoEngine {
     
     fn reset_qso(&mut self) {
         self.their_call = None;
+        self.their_grid = None; // 🟢 NEW: Clear grid
         self.their_report = None;
         self.tx_repeat_count = 0;
         self.qso_start_utc_ms = None;
@@ -686,7 +499,7 @@ mod tests {
         
         // B: listening, answers CQ
         let _ = b.on_intent(Intent::Listen);
-        let _ = b.on_intent(Intent::AnswerCq { their: "GW4WND".into(), rpt: 26 });
+        let _ = b.on_intent(Intent::AnswerCq { their: "GW4WND".into(), rpt: 26, grid: None });
         assert_eq!(b.state, QsoState::SendingReport);
         
         // B: next_tx returns CallWithReport
@@ -834,7 +647,7 @@ mod tests {
         a.my_report = 27;
         
         // Start QSO
-        let _ = a.on_intent(Intent::AnswerCq { their: "DK5HJ".into(), rpt: 27 });
+        let _ = a.on_intent(Intent::AnswerCq { their: "DK5HJ".into(), rpt: 27, grid: None });
         assert!(a.qso_start_utc_ms.is_some());
         
         // Simulate receiving R-report

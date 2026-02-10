@@ -41,15 +41,30 @@ pub struct AudioConfig {
 pub struct StationConfig {
     /// Station callsign
     pub callsign: String,
-
     /// Station grid square (e.g., "IO91")
     pub grid: Option<String>,
-
+    pub grid_indices: [usize; 4], // Stores Field1, Field2, Sq1, Sq2 indices
+    pub use_grid_in_cq: bool,     // Toggle for MSK2K Grid mode
     /// Auto-reply to CQ
     pub auto_reply_cq: bool,
-
     /// Auto-send 73 after exchange
     pub auto_73: bool,
+    /// Band selection (e.g., "2M", "70CM", "144.350")
+    pub band: Option<String>,     // 🟢 ADD THIS FIELD
+}
+
+impl Default for StationConfig {
+    fn default() -> Self {
+        Self {
+            callsign: String::new(),
+            grid: None,
+            grid_indices: [9, 14, 5, 4], // IO54
+            use_grid_in_cq: false,
+            auto_reply_cq: false,
+            auto_73: false,
+            band: Some("2M".to_string()), // 🟢 ADD THIS LINE
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,17 +101,6 @@ impl Default for AudioConfig {
             buffer_size: 1024,
             input_level: 0.8,
             output_level: 0.8,
-        }
-    }
-}
-
-impl Default for StationConfig {
-    fn default() -> Self {
-        Self {
-            callsign: "N0CALL".to_string(),
-            grid: None,
-            auto_reply_cq: false,
-            auto_73: false,
         }
     }
 }
@@ -183,6 +187,13 @@ impl Config {
             }
         }
     }
+}
+pub fn default_config_path() -> std::path::PathBuf {
+    let mut path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    path.push(".msk2k");
+    std::fs::create_dir_all(&path).ok();
+    path.push("config.toml");
+    path
 }
 
 #[cfg(test)]

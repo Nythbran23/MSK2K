@@ -37,6 +37,14 @@ pub enum TxRequest {
         their_call: String,
     },
 
+    /// NEW GRID PATH: Modem will use these bits directly as source for FEC 
+    RawBits {
+        bits: Vec<i32>,
+        slot_len_ms: u32,
+        my_call: String,
+        their_call: String,
+    },
+
     /// Stop TX immediately.
     /// RX decode MUST continue draining its buffer.
     Stop,
