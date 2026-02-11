@@ -247,6 +247,7 @@ UiEvent::RxText { text, snr, utc_ms, rx_slot } => {
 
 impl eframe::App for Msk2kEguiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.set_visuals(egui::Visuals::dark());
         self.drain_events();
 
         if self.settings_open {
