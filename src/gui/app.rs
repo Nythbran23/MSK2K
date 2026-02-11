@@ -8,7 +8,12 @@ use crate::engine::report_calc::report_from_correlation;
 use crate::qso::adif::{AdifLogger, QsoRecord};
 
 pub fn run_gui() -> anyhow::Result<()> {
-    let options = eframe::NativeOptions::default();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([800.0, 400.0])
+            .with_min_inner_size([500.0, 250.0]),
+        ..Default::default()
+    };
     let engine = crate::engine::start_engine();
 
     if let Err(e) = eframe::run_native(
@@ -25,6 +30,7 @@ pub fn run_gui() -> anyhow::Result<()> {
 struct LogEntry {
     text: String,
     colored: bool,
+    timestamp: String,
 }
 
 struct Msk2kEguiApp {
@@ -139,9 +145,16 @@ impl Msk2kEguiApp {
 
                 // src/gui/app.rs
 
-UiEvent::RxText { text, snr, utc_ms: _, rx_slot } => {
+UiEvent::RxText { text, snr, utc_ms, rx_slot } => {
     self.last_corr = snr.unwrap_or(self.last_corr);
     self.last_rx_slot = Some(rx_slot);
+    
+    let ts = {
+        let secs = (utc_ms / 1000) as i64;
+        chrono::DateTime::from_timestamp(secs, 0)
+            .map(|dt| dt.format("%H:%M").to_string())
+            .unwrap_or_default()
+    };
     
     let key = text.to_uppercase().trim().to_string();
     let count = self.decode_counts.entry(key.clone()).or_insert(0);
@@ -155,11 +168,12 @@ UiEvent::RxText { text, snr, utc_ms: _, rx_slot } => {
     if is_cq {
         // 1. CQs go ONLY to the SPOTS Log
         if *count == 1 {
-            let _ = push_cap_entry(&mut self.cq_log, LogEntry { text: display.clone(), colored: stamp });
+            let _ = push_cap_entry(&mut self.cq_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone() });
             self.cq_log_index.insert(key.clone(), self.cq_log.len().saturating_sub(1));
         } else if let Some(&idx) = self.cq_log_index.get(&key) {
             if idx < self.cq_log.len() { 
                 self.cq_log[idx].text = display; 
+                self.cq_log[idx].timestamp = ts;
                 if stamp { self.cq_log[idx].colored = true; } 
             }
         }
@@ -167,17 +181,18 @@ UiEvent::RxText { text, snr, utc_ms: _, rx_slot } => {
         // 2. Private Messages go ONLY to the RX Log (QSO Window)
         // This keeps your QSO window clean of random CQs.
         if *count == 1 {
-            let _ = push_cap_entry(&mut self.rx_log, LogEntry { text: display.clone(), colored: stamp });
+            let _ = push_cap_entry(&mut self.rx_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone() });
             self.decode_log_index.insert(key.clone(), self.rx_log.len().saturating_sub(1));
         } else if let Some(&idx) = self.decode_log_index.get(&key) {
             if idx < self.rx_log.len() { 
                 self.rx_log[idx].text = display; 
+                self.rx_log[idx].timestamp = ts;
                 if stamp { self.rx_log[idx].colored = true; } 
             }
         }
     }
 }
-                UiEvent::TxText { text } => { push_cap_entry(&mut self.tx_log, LogEntry { text, colored: self.in_active_qso || !self.their_call.is_empty() }); }
+                UiEvent::TxText { text } => { push_cap_entry(&mut self.tx_log, LogEntry { text, colored: self.in_active_qso || !self.their_call.is_empty(), timestamp: String::new() }); }
                 UiEvent::State(s) => {
                     self.current_state = s.clone();
                     if s.contains("Listening") { self.is_listening = true; }
@@ -368,7 +383,11 @@ impl eframe::App for Msk2kEguiApp {
                 
                 // 🟢 Band selector with Custom option
                 let display_band = self.band.clone(); // Just show the band value directly
-                
+                let saved_selection = ui.visuals().selection.bg_fill;
+                let saved_inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
+                let slate = egui::Color32::from_rgb(70, 90, 110);
+                ui.visuals_mut().selection.bg_fill = slate;
+                ui.visuals_mut().widgets.inactive.weak_bg_fill = slate;
                 egui::ComboBox::from_id_salt("band").selected_text(&display_band).width(100.0).show_ui(ui, |ui| {
                     for b in &["6M", "4M", "2M", "70CM"] { 
                         // 🟢 Band is UI-only, just update local state
@@ -408,11 +427,13 @@ impl eframe::App for Msk2kEguiApp {
                     
                     ui.label(egui::RichText::new("Type and press Enter").small().italics().color(egui::Color32::GRAY));
                 });
+                ui.visuals_mut().widgets.inactive.weak_bg_fill = saved_inactive_bg;
                 
                 ui.add_space(15.0); ui.label("PERIOD:");
                 if ui.selectable_value(&mut self.slot_period, SlotPeriod::S15, "15s").changed() || ui.selectable_value(&mut self.slot_period, SlotPeriod::S30, "30s").changed() { let _ = self.engine.cmds.send(UiCmd::SetSlotPeriod(self.slot_period)); }
                 ui.add_space(15.0); ui.label("TX SLOT:");
                 if ui.selectable_value(&mut self.slot_parity, SlotParity::Even, "Even").changed() || ui.selectable_value(&mut self.slot_parity, SlotParity::Odd, "Odd").changed() { let _ = self.engine.cmds.send(UiCmd::SetSlotParity(self.slot_parity)); }
+                ui.visuals_mut().selection.bg_fill = saved_selection;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⚙").clicked() { self.settings_open = true; }
                     ui.label(egui::RichText::new(chrono::Utc::now().format("%H:%M:%S Z").to_string()).monospace());
@@ -422,7 +443,7 @@ impl eframe::App for Msk2kEguiApp {
 
         egui::TopBottomPanel::top("actions").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let blue = egui::Color32::from_rgb(31, 111, 235);
+                let blue = egui::Color32::from_rgb(56, 120, 70);
                 if ui.add_sized([90.0, 30.0], egui::Button::new("📻 LISTEN").fill(if self.is_listening { blue } else { egui::Color32::from_rgb(45, 45, 45) })).clicked() {
                     if self.is_listening {
                         // 🟢 Stop listening - toggle OFF
@@ -505,6 +526,11 @@ impl eframe::App for Msk2kEguiApp {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("⏹ STOP").clicked() { self.their_call = String::new(); self.is_calling_cq = false; self.is_listening = false; let _ = self.engine.cmds.send(UiCmd::Stop); }
+                    if self.in_active_qso || !self.their_call.is_empty() {
+                        ui.add_space(10.0);
+                        let green = egui::Color32::from_rgb(56, 120, 70);
+                        ui.add(egui::Button::new(egui::RichText::new("IN QSO").strong().color(egui::Color32::WHITE)).fill(green).sense(egui::Sense::hover()));
+                    }
                 });
             });
         });
@@ -531,10 +557,11 @@ impl eframe::App for Msk2kEguiApp {
                         });
                         
                         let id = match i { 0 => "rx_sc", 1 => "tx_sc", _ => "cq_sc" };
-                        egui::ScrollArea::vertical().id_salt(id).stick_to_bottom(true).show(ui, |ui| {
+                        let available_h = ui.available_height();
+                        egui::ScrollArea::vertical().id_salt(id).max_height(available_h).stick_to_bottom(false).show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             let log = match i { 0 => &self.rx_log, 1 => &self.tx_log, _ => &self.cq_log };
-                            for entry in log {
+                            for entry in log.iter().rev() {
                                 // 🟢 TX column (i==1) - compact background, right-aligned text
                                 if i == 1 {
                                     // Allocate space for the row
@@ -580,13 +607,20 @@ impl eframe::App for Msk2kEguiApp {
                                                 ui.painter().rect_filled(bar_rect, 0.0, egui::Color32::from_rgb(31, 143, 58));
                                             }
                                             
-                                            if ui.selectable_label(false, &entry.text).clicked() { 
-                                                // 🟢 Extract both call and grid
-                                                if let Some((call, grid)) = extract_callsign_and_grid(&entry.text) { 
-                                                    clicked_call = Some(call);
-                                                    clicked_grid = grid;
-                                                } 
-                                            }
+                                            ui.horizontal(|ui| {
+                                                if ui.selectable_label(false, &entry.text).clicked() { 
+                                                    // 🟢 Extract both call and grid
+                                                    if let Some((call, grid)) = extract_callsign_and_grid(&entry.text) { 
+                                                        clicked_call = Some(call);
+                                                        clicked_grid = grid;
+                                                    } 
+                                                }
+                                                if !entry.timestamp.is_empty() {
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        ui.label(egui::RichText::new(&entry.timestamp).small().color(egui::Color32::GRAY));
+                                                    });
+                                                }
+                                            });
                                         });
                                     });
                                 }
