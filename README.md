@@ -84,30 +84,72 @@ MSK2K is designed to reduce operator fatigue while maintaining control over the 
 
 ---
 
-## Installation & Building
-
-### Prerequisites
-
-MSK2K is built in Rust and is designed to be cross-platform.
-
-- **Windows:** Works out of the box (uses WASAPI).
-- **macOS:** CoreAudio supported natively.
-- **Linux:** Requires ALSA development headers:
-  ```
-  sudo apt-get install libasound2-dev libudev-dev pkg-config
-  ```
+## Installation
 
 ### Pre-built Binaries
 
 Download the latest release for your platform from the [Releases](https://github.com/Nythbran23/MSK2K/releases) page:
 
-- `msk2k-linux` — Linux x86_64
-- `msk2k-macos` — macOS (Apple Silicon)
-- `msk2k-windows.exe` — Windows x86_64
+| Platform | File | Notes |
+|----------|------|-------|
+| Windows | `msk2k-windows.exe` | x86_64, runs out of the box (WASAPI) |
+| macOS | `msk2k-macos` | Apple Silicon, CoreAudio supported natively |
+| Linux | `msk2k-linux` | x86_64, requires ALSA (see below) |
+
+#### Windows
+Download and double-click `msk2k-windows.exe`. No additional dependencies required.
+
+#### macOS
+Download `msk2k-macos`, then open a terminal:
+```bash
+chmod +x ~/Downloads/msk2k-macos
+~/Downloads/msk2k-macos
+```
+On first run, macOS may block it. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
+
+#### Linux
+Download `msk2k-linux`, then open a terminal:
+```bash
+chmod +x ~/Downloads/msk2k-linux
+~/Downloads/msk2k-linux
+```
+
+**Runtime dependencies** (most desktop installs already have these):
+
+Ubuntu/Debian 24.04+:
+```bash
+sudo apt-get install libasound2t64 libxkbcommon0 libx11-6 libwayland-client0
+```
+
+Older Ubuntu/Debian:
+```bash
+sudo apt-get install libasound2 libxkbcommon0 libx11-6 libwayland-client0
+```
+
+Fedora/RHEL:
+```bash
+sudo dnf install alsa-lib libX11 libwayland-client libxkbcommon
+```
+
+> **Note:** The ALSA warnings in the terminal output (e.g. `Cannot get card index`) are normal and can be safely ignored.
 
 ### Building from Source
 
+**Prerequisites:** Rust toolchain ([rustup.rs](https://rustup.rs))
+
+Linux also requires development headers:
+```bash
+# Ubuntu/Debian 24.04+
+sudo apt-get install libasound2t64 libasound2-dev libudev-dev pkg-config libx11-dev libwayland-dev libxkbcommon-dev
+
+# Older Ubuntu/Debian
+sudo apt-get install libasound2 libasound2-dev libudev-dev pkg-config libx11-dev libwayland-dev libxkbcommon-dev
+
+# Fedora/RHEL
+sudo dnf install alsa-lib-devel systemd-devel libX11-devel wayland-devel libxkbcommon-devel
 ```
+
+```bash
 git clone https://github.com/Nythbran23/MSK2K.git
 cd MSK2K
 cargo build --release
