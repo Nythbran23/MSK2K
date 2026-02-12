@@ -42,7 +42,7 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libasound2-dev libudev-dev pkg-config libx11-dev libasound2t64 libwayland-dev libxkbcommon-dev libhamlib-dev hamlib-utils
+        sudo apt-get install -y libasound2-dev libudev-dev pkg-config libx11-dev libasound2t64 libwayland-dev libxkbcommon-dev libhamlib-dev libhamlib-utils
 
     - name: Install macOS Deps
       if: runner.os == 'macOS'
