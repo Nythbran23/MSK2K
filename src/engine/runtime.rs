@@ -190,7 +190,7 @@ async fn run_runtime(
     let mut output_device: Option<String> = saved_cfg.output_device.clone();
     let sample_rate: u32 = 48_000;
     let buffer_size: usize = 1024;
-    let output_level: f32 = 0.4;
+    let mut output_level: f32 = 0.4;
     let decode_window_secs: f32 = 4.0;
 
     let mut qso_engine = QsoEngine::new(saved_cfg.my_call.clone());
@@ -202,6 +202,7 @@ async fn run_runtime(
     let mut slot_period = SlotPeriod::S15;
     let mut slot_parity_cfg = SlotParity::Odd;
     let mut running = false;
+    let mut tx_active = false;
     let mut last_slot_index: Option<i64> = None;
 
     let mut observed_remote_slot: Option<u8> = None;
@@ -209,8 +210,8 @@ async fn run_runtime(
     let mut rx_needs_restart: bool = true;
     let mut diag_tick: u64 = 0; // 🔍 DIAGNOSTIC: heartbeat counter
 
-    let (ham_update_tx, _ham_update_rx) = mpsc::unbounded_channel();
-    let mut hamlib: Option<HamlibClient> = Some(HamlibClient::new("127.0.0.1:4532".to_string(), ham_update_tx));
+    let (ham_update_tx, mut ham_update_rx) = mpsc::unbounded_channel();
+    let mut hamlib: Option<HamlibClient> = None;
 
     // 🟢 2. Initialize Launcher Process Holder
     let mut rigctld_process: Option<Child> = None;
@@ -243,11 +244,6 @@ async fn run_runtime(
         ));
     }
     
-    let (ham_update_tx, _ham_update_rx) = mpsc::unbounded_channel();
-    // Connect to localhost:4532 (Default rigctld port).
-    // This runs in the background and won't crash if the radio isn't there.
-    let mut hamlib: Option<HamlibClient> = Some(HamlibClient::new("127.0.0.1:4532".to_string(), ham_update_tx));
-
     loop {
         tokio::select! {
             _ = sleep(Duration::from_millis(50)) => {
@@ -260,6 +256,11 @@ async fn run_runtime(
                         qso_engine.state, running,
                         rx_config_tx.is_some(), rx_stop_tx.is_some(),
                         qso_engine.their_call, observed_remote_slot);
+                }
+
+                // 🟢 Poll rig frequency every ~5 seconds
+                if diag_tick % 100 == 0 {
+                    if let Some(h) = &hamlib { h.refresh(); }
                 }
 
                 let now_ms = utc_ms_now();
@@ -307,6 +308,7 @@ async fn run_runtime(
 
                     if should_tx {
                         if let Some(h) = &hamlib { h.set_ptt(true); }
+                        if !tx_active { tx_active = true; let _ = evt_tx.send(UiEvent::TxActive(true)); }
 
                         if let Some(payload) = qso_engine.next_tx() {
                             let mut final_payload = payload;
@@ -386,9 +388,12 @@ async fn run_runtime(
                         }
                     }
                         else {
-                        // If we are NOT supposed to be transmitting, ensure PTT is OFF.
-                        // This runs repeatedly every 50ms, keeping the radio in RX.
-                        if let Some(h) = &hamlib { h.set_ptt(false); }
+                        // Only release PTT once when transitioning from TX to RX
+                        if tx_active {
+                            if let Some(h) = &hamlib { h.set_ptt(false); }
+                            tx_active = false;
+                            let _ = evt_tx.send(UiEvent::TxActive(false));
+                        }
                     }    
                 }
             }
@@ -400,11 +405,14 @@ async fn run_runtime(
                     UiCmd::SetSlotPeriod(p) => { slot_period = p; last_slot_index = None; }
                     UiCmd::SetSlotParity(p) => { slot_parity_cfg = p; }
                     UiCmd::SetAutoQso(on) => { auto_qso = on; }
+                    UiCmd::SetTxLevel(level) => { 
+                        output_level = level.clamp(0.0, 1.0);
+                        log::info!("[ENGINE] TX level set to {:.0}%", output_level * 100.0);
+                    }
                     
                     UiCmd::ConfigureHamlib { enabled, address } => {
                         if enabled {
-                            let (tx, _rx) = mpsc::unbounded_channel(); 
-                            hamlib = Some(HamlibClient::new(address, tx));
+                            hamlib = Some(HamlibClient::new(address, ham_update_tx.clone()));
                         } else {
                             hamlib = None;
                         }
@@ -600,6 +608,7 @@ async fn run_runtime(
                     UiCmd::Stop => {
                         running = false;
                         if let Some(h) = &hamlib { h.set_ptt(false); }
+                        if tx_active { tx_active = false; let _ = evt_tx.send(UiEvent::TxActive(false)); }
                         let (_, events) = qso_engine.on_intent(Intent::Abort);
                         process_qso_events(&events, &evt_tx, &rx_config_tx);
                         observed_remote_slot = None;
@@ -720,6 +729,12 @@ async fn run_runtime(
                             their_call: qso_engine.their_call.clone().unwrap_or_default(),
                         });
                     }
+                }
+            }
+            Some(update) = ham_update_rx.recv() => {
+                if let Some(freq) = update.freq {
+                    log::debug!("[Hamlib] Freq: {} Hz", freq);
+                    let _ = evt_tx.send(UiEvent::RigFreqChanged { freq_hz: freq });
                 }
             }
             else => break,

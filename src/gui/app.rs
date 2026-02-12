@@ -40,6 +40,8 @@ struct Msk2kEguiApp {
     their_call: String,
     band: String,
     custom_band_input: String,
+    rig_freq_hz: Option<u64>,
+    tx_level: f32,
     slot_parity: SlotParity,
     slot_period: SlotPeriod,
     saved_slot_parity: Option<SlotParity>,
@@ -51,6 +53,7 @@ struct Msk2kEguiApp {
     is_listening: bool,
     is_calling_cq: bool,
     in_active_qso: bool,
+    is_transmitting: bool,
     rx_log: Vec<LogEntry>,
     tx_log: Vec<LogEntry>,
     cq_log: Vec<LogEntry>,
@@ -131,6 +134,7 @@ impl Msk2kEguiApp {
             their_call: String::new(),
             band: "2M".to_string(),
             custom_band_input: String::new(),
+            rig_freq_hz: None,
             slot_parity: SlotParity::Odd,
             slot_period: SlotPeriod::S15,
             saved_slot_parity: None,
@@ -142,6 +146,7 @@ impl Msk2kEguiApp {
             is_listening: false,
             is_calling_cq: false,
             in_active_qso: false,
+            is_transmitting: false,
             rx_log: Vec::new(),
             tx_log: Vec::new(),
             cq_log: Vec::new(),
@@ -154,15 +159,17 @@ impl Msk2kEguiApp {
             qso_log_expanded: false, 
             adif_logger,
             current_state: "Idle".to_string(),
-            config,
             
-            // Rig Control Defaults
-            hamlib_enabled: true, 
+            // Rig Control - load from saved config (read before config moves)
+            hamlib_enabled: config.station.hamlib_enabled,
             hamlib_address: "127.0.0.1:4532".to_string(),
             launcher_enabled: false,
-            rig_model: "3081".to_string(), // Default to IC-9700
-            rig_port: String::new(),
-            rig_baud: "19200".to_string(),
+            rig_model: config.station.rig_model.clone(),
+            rig_port: config.station.rig_port.clone(),
+            rig_baud: config.station.rig_baud.clone(),
+            tx_level: config.station.tx_level,
+
+            config,
             available_ports: Vec::new(),
             rig_list,
             rig_search: String::new(),
@@ -205,6 +212,22 @@ impl Msk2kEguiApp {
                         self.is_listening = true;
                         self.current_state = "Listening".to_string();
                         log::info!("[UI] Auto-start detected, UI is_listening = true");
+                    }
+
+                    // Auto-launch Hamlib if enabled in saved config
+                    if self.hamlib_enabled && !self.rig_model.is_empty() && !self.rig_port.is_empty() {
+                        log::info!("[UI] Auto-starting Hamlib: model={} port={}", self.rig_model, self.rig_port);
+                        let _ = self.engine.cmds.send(UiCmd::ConfigureHamlib { 
+                            enabled: true, 
+                            address: "127.0.0.1:4532".to_string(),
+                        });
+                        let baud = self.rig_baud.parse().unwrap_or(19200);
+                        let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
+                            enable_launcher: true,
+                            rig_model: self.rig_model.clone(),
+                            serial_port: self.rig_port.clone(),
+                            baud_rate: baud,
+                        });
                     }
                 },
                 UiEvent::RxText { text, snr, utc_ms, rx_slot } => {
@@ -273,6 +296,10 @@ impl Msk2kEguiApp {
                 UiEvent::QsoLogged { record } => {
                     let mut updated_record = record;
                     updated_record.band = self.band.clone();
+                    if let Some(freq) = self.rig_freq_hz {
+                        let khz = ((freq + 500) / 1000) * 1000;
+                        updated_record.freq = Some(khz as f64 / 1_000_000.0);
+                    }
                     
                     let _ = self.adif_logger.log_qso(&updated_record); 
                     self.qso_log.insert(0, updated_record);
@@ -284,6 +311,13 @@ impl Msk2kEguiApp {
                         self.slot_parity = saved;
                     }
                 }
+                UiEvent::RigFreqChanged { freq_hz } => {
+                    self.rig_freq_hz = Some(freq_hz);
+                    self.band = freq_to_band(freq_hz);
+                }
+                UiEvent::TxActive(active) => {
+                    self.is_transmitting = active;
+                }
                 _ => {}
             }
         }
@@ -292,6 +326,7 @@ impl Msk2kEguiApp {
     fn send_apply_audio(&mut self) {
         let _ = self.engine.cmds.send(UiCmd::SetInputDevice(self.sel_in.clone()));
         let _ = self.engine.cmds.send(UiCmd::SetOutputDevice(self.sel_out.clone()));
+        let _ = self.engine.cmds.send(UiCmd::SetTxLevel(self.tx_level));
         let _ = self.engine.cmds.send(UiCmd::SetSlotParity(self.slot_parity));
         let _ = self.engine.cmds.send(UiCmd::SetSlotPeriod(self.slot_period));
         let _ = self.engine.cmds.send(UiCmd::ApplyAudio);
@@ -391,65 +426,55 @@ impl eframe::App for Msk2kEguiApp {
 
                 if self.hamlib_enabled {
                     ui.indent("cat_indent", |ui| {
-                        ui.checkbox(&mut self.launcher_enabled, "Auto-Start Rigctld (Embedded)");
-                        
-                        if self.launcher_enabled {
-                            egui::Grid::new("launcher_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                                // 🟢 NEW RIG SELECTOR
-                                ui.label("Rig Selection:");
-                                ui.vertical(|ui| {
-                                    // 1. Search Box
-                                    ui.text_edit_singleline(&mut self.rig_search)
-                                        .on_hover_text("Type your radio name (e.g. '7300') to filter");
-                                    
-                                    // 2. Dropdown
-                                    let current_name = self.rig_list.iter()
+                        egui::Grid::new("launcher_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                            ui.label("Rig Selection:");
+                            ui.vertical(|ui| {
+                                ui.text_edit_singleline(&mut self.rig_search)
+                                    .on_hover_text("Type your radio name (e.g. '7300') to filter");
+                                
+                                let current_name = if self.rig_model.is_empty() {
+                                    "Select Rig...".to_string()
+                                } else {
+                                    self.rig_list.iter()
                                         .find(|(id, _)| id == &self.rig_model)
                                         .map(|(_, name)| name.clone())
-                                        .unwrap_or_else(|| format!("ID: {}", self.rig_model));
+                                        .unwrap_or_else(|| format!("ID: {}", self.rig_model))
+                                };
 
-                                    egui::ComboBox::from_id_salt("rig_select")
-                                        .selected_text(current_name)
-                                        .width(250.0)
-                                        .show_ui(ui, |ui| {
-                                            // Filter the massive list based on user typing
-                                            let search_upper = self.rig_search.to_uppercase();
-                                            for (id, name) in &self.rig_list {
-                                                if self.rig_search.is_empty() || name.to_uppercase().contains(&search_upper) || id.contains(&search_upper) {
-                                                    if ui.selectable_value(&mut self.rig_model, id.clone(), name).clicked() {
-                                                        // Auto-clear search on select if you want
-                                                    }
+                                egui::ComboBox::from_id_salt("rig_select")
+                                    .selected_text(current_name)
+                                    .width(250.0)
+                                    .show_ui(ui, |ui| {
+                                        let search_upper = self.rig_search.to_uppercase();
+                                        for (id, name) in &self.rig_list {
+                                            if self.rig_search.is_empty() || name.to_uppercase().contains(&search_upper) || id.contains(&search_upper) {
+                                                if ui.selectable_value(&mut self.rig_model, id.clone(), name).clicked() {
                                                 }
                                             }
-                                        });
-                                });
-                                ui.end_row();
-
-                                ui.label("Serial Port:");
-                                ui.horizontal(|ui| {
-                                    egui::ComboBox::from_id_salt("ser_port")
-                                        .selected_text(&self.rig_port)
-                                        .width(200.0)
-                                        .show_ui(ui, |ui| {
-                                            for p in &self.available_ports {
-                                                ui.selectable_value(&mut self.rig_port, p.clone(), p);
-                                            }
-                                        });
-                                    if ui.button("🔄").clicked() { self.refresh_serial_ports(); }
-                                });
-                                ui.end_row();
-
-                                ui.label("Baud Rate:");
-                                ui.text_edit_singleline(&mut self.rig_baud);
-                                ui.end_row();
+                                        }
+                                    });
                             });
-                        } else {
+                            ui.end_row();
+
+                            ui.label("Serial Port:");
                             ui.horizontal(|ui| {
-                                ui.label("Network Address:");
-                                ui.text_edit_singleline(&mut self.hamlib_address);
+                                let port_display = if self.rig_port.is_empty() { "Select Port...".to_string() } else { self.rig_port.clone() };
+                                egui::ComboBox::from_id_salt("ser_port")
+                                    .selected_text(&port_display)
+                                    .width(350.0)
+                                    .show_ui(ui, |ui| {
+                                        for p in &self.available_ports {
+                                            ui.selectable_value(&mut self.rig_port, p.clone(), p);
+                                        }
+                                    });
+                                if ui.button("🔄").clicked() { self.refresh_serial_ports(); }
                             });
-                            ui.label(egui::RichText::new("Ensure 'rigctld' is running externally.").small().italics().color(egui::Color32::GRAY));
-                        }
+                            ui.end_row();
+
+                            ui.label("Baud Rate:");
+                            ui.text_edit_singleline(&mut self.rig_baud);
+                            ui.end_row();
+                        });
                     });
                 }
                 
@@ -468,6 +493,17 @@ impl eframe::App for Msk2kEguiApp {
                     for d in &self.out_devs { ui.selectable_value(&mut self.sel_out, Some(d.clone()), d.clone()); }
                 });
                 
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label("TX Level:");
+                    let slider = egui::Slider::new(&mut self.tx_level, 0.0..=1.0)
+                        .custom_formatter(|v, _| format!("{}%", (v * 100.0).round() as i32))
+                        .custom_parser(|s| s.trim_end_matches('%').parse::<f64>().ok().map(|v| v / 100.0));
+                    if ui.add(slider).changed() {
+                        let _ = self.engine.cmds.send(UiCmd::SetTxLevel(self.tx_level));
+                    }
+                });
+                
                 ui.add_space(15.0);
                 if ui.button("Save & Close").clicked() { close = true; }
             });
@@ -476,14 +512,13 @@ impl eframe::App for Msk2kEguiApp {
                 self.send_apply_audio();
                 
                 // 1. Configure Hamlib
-                let address = if self.launcher_enabled { "127.0.0.1:4532".to_string() } else { self.hamlib_address.clone() };
                 let _ = self.engine.cmds.send(UiCmd::ConfigureHamlib { 
                     enabled: self.hamlib_enabled, 
-                    address 
+                    address: "127.0.0.1:4532".to_string(),
                 });
 
-                // 2. Configure Launcher
-                if self.launcher_enabled {
+                // 2. Configure Launcher (auto-start rigctld when CAT enabled)
+                if self.hamlib_enabled {
                     let baud = self.rig_baud.parse().unwrap_or(19200);
                     let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
                         enable_launcher: true,
@@ -507,7 +542,12 @@ impl eframe::App for Msk2kEguiApp {
                 self.is_calling_cq = false;
                 self.current_state = "Listening".to_string();
 
-                // 4. Save Config
+                // 4. Save Config (including rig settings)
+                self.config.station.hamlib_enabled = self.hamlib_enabled;
+                self.config.station.rig_model = self.rig_model.clone();
+                self.config.station.rig_port = self.rig_port.clone();
+                self.config.station.rig_baud = self.rig_baud.clone();
+                self.config.station.tx_level = self.tx_level;
                 let _ = self.config.save(&crate::settings::default_config_path());
                 self.settings_open = false; 
             }
@@ -518,43 +558,22 @@ impl eframe::App for Msk2kEguiApp {
             ui.add_space(5.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&self.my_call).strong().size(22.0).color(egui::Color32::GRAY));
-                ui.add_space(20.0); ui.label("BAND:");
+                ui.add_space(20.0);
                 
-                let display_band = self.band.clone(); 
+                // Frequency from rig (or "No CAT" if not connected)
+                let freq_display = if let Some(freq) = self.rig_freq_hz {
+                    let khz = ((freq + 500) / 1000) * 1000;
+                    format!("{:.3} MHz", khz as f64 / 1_000_000.0)
+                } else {
+                    "No CAT".to_string()
+                };
+                ui.label(egui::RichText::new(&freq_display).monospace().size(16.0).color(egui::Color32::from_rgb(100, 200, 130)));
+                
                 let saved_selection = ui.visuals().selection.bg_fill;
                 let saved_inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
                 let slate = egui::Color32::from_rgb(70, 90, 110);
                 ui.visuals_mut().selection.bg_fill = slate;
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = slate;
-                egui::ComboBox::from_id_salt("band").selected_text(&display_band).width(100.0).show_ui(ui, |ui| {
-                    for b in &["6M", "4M", "2M", "70CM"] { 
-                        ui.selectable_value(&mut self.band, b.to_string(), *b);
-                    }
-                    ui.separator();
-                    
-                    ui.label("Custom:");
-                    let text_edit = egui::TextEdit::singleline(&mut self.custom_band_input)
-                        .hint_text("e.g. 144.350")
-                        .desired_width(80.0);
-                    
-                    let response = ui.add(text_edit);
-                    response.request_focus();
-                    
-                    if response.changed() {
-                        if self.custom_band_input.len() > 7 {
-                            self.custom_band_input.truncate(7);
-                        }
-                        self.custom_band_input = self.custom_band_input.to_uppercase();
-                    }
-                    
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.custom_band_input.is_empty() {
-                        self.band = self.custom_band_input.clone();
-                        self.custom_band_input.clear();
-                    }
-                    
-                    ui.label(egui::RichText::new("Type and press Enter").small().italics().color(egui::Color32::GRAY));
-                });
-                ui.visuals_mut().widgets.inactive.weak_bg_fill = saved_inactive_bg;
                 
                 ui.add_space(15.0); ui.label("PERIOD:");
                 if ui.selectable_value(&mut self.slot_period, SlotPeriod::S15, "15s").changed() || ui.selectable_value(&mut self.slot_period, SlotPeriod::S30, "30s").changed() { let _ = self.engine.cmds.send(UiCmd::SetSlotPeriod(self.slot_period)); }
@@ -562,7 +581,10 @@ impl eframe::App for Msk2kEguiApp {
                 if ui.selectable_value(&mut self.slot_parity, SlotParity::Even, "Even").changed() || ui.selectable_value(&mut self.slot_parity, SlotParity::Odd, "Odd").changed() { let _ = self.engine.cmds.send(UiCmd::SetSlotParity(self.slot_parity)); }
                 ui.visuals_mut().selection.bg_fill = saved_selection;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⚙").clicked() { self.settings_open = true; }
+                    if ui.button("⚙").clicked() { 
+                        self.settings_open = true; 
+                        self.refresh_serial_ports();
+                    }
                     ui.label(egui::RichText::new(chrono::Utc::now().format("%H:%M:%S Z").to_string()).monospace());
                 });
             });
@@ -663,14 +685,12 @@ impl eframe::App for Msk2kEguiApp {
                     cols[i].vertical(|ui| {
                         ui.horizontal(|ui| {
                             let label = match i { 0 => "📥 RX", 1 => "📤 TX", _ => "🎯 SPOTS" };
-                            ui.heading(label);
-                            
-                            if i == 0 {
-                                ui.label(egui::RichText::new("Auto-Level").size(10.0).color(egui::Color32::GRAY));
-                            } else if i == 1 {
-                                ui.label(egui::RichText::new("Fixed Output").size(10.0).color(egui::Color32::GRAY));
+                            if i == 1 && self.is_transmitting {
+                                ui.heading(egui::RichText::new(label).color(egui::Color32::from_rgb(255, 50, 50)));
+                            } else {
+                                ui.heading(label);
                             }
-
+                            
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.small_button("🗑").clicked() { match i { 0 => self.rx_log.clear(), 1 => self.tx_log.clear(), _ => self.cq_log.clear() }; }
                             });
@@ -772,7 +792,7 @@ impl eframe::App for Msk2kEguiApp {
                         ui.add_sized([80.0, 20.0], egui::Label::new(egui::RichText::new("DATE").strong().color(egui::Color32::GRAY)));
                         ui.add_sized([65.0, 20.0], egui::Label::new(egui::RichText::new("START (Z)").strong().color(egui::Color32::GRAY)));
                         ui.add_sized([65.0, 20.0], egui::Label::new(egui::RichText::new("END (Z)").strong().color(egui::Color32::GRAY)));
-                        ui.add_sized([60.0, 20.0], egui::Label::new(egui::RichText::new("BAND").strong().color(egui::Color32::GRAY)));
+                        ui.add_sized([75.0, 20.0], egui::Label::new(egui::RichText::new("FREQ").strong().color(egui::Color32::GRAY)));
                         ui.add_sized([90.0, 20.0], egui::Label::new(egui::RichText::new("STATION").strong().color(egui::Color32::GRAY)));
                         ui.add_sized([50.0, 20.0], egui::Label::new(egui::RichText::new("GRID").strong().color(egui::Color32::GRAY)));
                         ui.add_sized([40.0, 20.0], egui::Label::new(egui::RichText::new("SENT").strong().color(egui::Color32::GRAY)));
@@ -793,7 +813,8 @@ impl eframe::App for Msk2kEguiApp {
                                 ui.add_sized([80.0, 18.0], egui::Label::new(&q.display_date()));
                                 ui.add_sized([65.0, 18.0], egui::Label::new(&q.display_time_on()));
                                 ui.add_sized([65.0, 18.0], egui::Label::new(&q.display_time_off()));
-                                ui.add_sized([60.0, 18.0], egui::Label::new(&q.band));
+                                let freq_str = q.freq.map(|f| format!("{:.3}", f)).unwrap_or_else(|| "—".to_string());
+                                ui.add_sized([75.0, 18.0], egui::Label::new(&freq_str));
                                 ui.add_sized([90.0, 18.0], egui::Label::new(egui::RichText::new(&q.call).strong().color(egui::Color32::LIGHT_BLUE)));
                                 ui.add_sized([50.0, 18.0], egui::Label::new(q.gridsquare.as_deref().unwrap_or("—")));
                                 ui.add_sized([40.0, 18.0], egui::Label::new(&q.rst_sent));
@@ -888,11 +909,73 @@ fn extract_callsign(text: &str) -> Option<String> {
 fn push_cap_entry(v: &mut Vec<LogEntry>, s: LogEntry) { if v.len() >= 100 { v.remove(0); } v.push(s); }
 
 fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
+    use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    let mut ins = host.input_devices().map(|d| d.map(|x| x.name().unwrap_or_default()).collect()).unwrap_or(vec![]);
-    let mut outs = host.output_devices().map(|d| d.map(|x| x.name().unwrap_or_default()).collect()).unwrap_or(vec![]);
-    ins.sort(); ins.dedup(); outs.sort(); outs.dedup();
-    (ins, outs)
+    
+    // Collect ALL devices with their capabilities
+    let mut all_devices: Vec<(String, bool, bool)> = Vec::new(); // (name, has_input, has_output)
+    
+    if let Ok(devs) = host.devices() {
+        for d in devs {
+            if let Ok(name) = d.name() {
+                let has_in = d.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                    || d.default_input_config().is_ok();
+                let has_out = d.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                    || d.default_output_config().is_ok();
+                all_devices.push((name, has_in, has_out));
+            }
+        }
+    }
+    
+    all_devices.sort_by(|a, b| a.0.cmp(&b.0));
+    
+    // For duplicate names, label them with capabilities to help the user
+    let mut name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (name, _, _) in &all_devices {
+        *name_counts.entry(name.clone()).or_insert(0) += 1;
+    }
+    
+    // First pass: collect capabilities per duplicate group
+    let mut group_caps: std::collections::HashMap<String, Vec<(bool, bool)>> = std::collections::HashMap::new();
+    for (name, has_in, has_out) in &all_devices {
+        if name_counts[name.as_str()] > 1 {
+            group_caps.entry(name.clone()).or_default().push((*has_in, *has_out));
+        }
+    }
+    
+    let mut name_indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let display_names: Vec<String> = all_devices.iter().map(|(name, has_in, has_out)| {
+        if name_counts[name.as_str()] > 1 {
+            let idx = name_indices.entry(name.clone()).or_insert(0);
+            *idx += 1;
+            let caps = &group_caps[name.as_str()];
+            let has_rx_sibling = caps.iter().any(|(i, _)| *i);
+            let has_tx_sibling = caps.iter().any(|(_, o)| *o);
+            
+            let label = match (*has_in, *has_out) {
+                (true, false) => "RX".to_string(),
+                (false, true) => "TX".to_string(),
+                (true, true)  => "RX/TX".to_string(),
+                (false, false) => {
+                    // Can't detect capability — infer from sibling
+                    if has_rx_sibling && !has_tx_sibling {
+                        "TX".to_string()  // Sibling is RX, so this must be TX
+                    } else if has_tx_sibling && !has_rx_sibling {
+                        "RX".to_string()  // Sibling is TX, so this must be RX
+                    } else {
+                        format!("{}", idx)  // Can't infer, use number
+                    }
+                }
+            };
+            format!("{} ({})", name, label)
+        } else {
+            name.clone()
+        }
+    }).collect();
+    
+    log::info!("[AUDIO] All devices: {:?}", display_names);
+    
+    (display_names.clone(), display_names)
 }
 
 // 🟢 PASTE AT BOTTOM OF src/gui/app.rs
@@ -921,4 +1004,30 @@ fn get_bundled_rigctl_path() -> String {
     // 5. Fallback: Assume installed globally (Homebrew/Linux package)
     // On Mac/Linux, this is often where it lives if not bundled correctly.
     "rigctld".to_string()
+}
+
+/// Map a frequency in Hz to amateur band name
+fn freq_to_band(freq_hz: u64) -> String {
+    let khz = ((freq_hz + 500) / 1000) * 1000;
+    let mhz = khz as f64 / 1_000_000.0;
+    match mhz {
+        f if (1.8..=2.0).contains(&f) => "160M".to_string(),
+        f if (3.5..=4.0).contains(&f) => "80M".to_string(),
+        f if (5.0..=5.5).contains(&f) => "60M".to_string(),
+        f if (7.0..=7.3).contains(&f) => "40M".to_string(),
+        f if (10.0..=10.2).contains(&f) => "30M".to_string(),
+        f if (14.0..=14.35).contains(&f) => "20M".to_string(),
+        f if (18.0..=18.2).contains(&f) => "17M".to_string(),
+        f if (21.0..=21.45).contains(&f) => "15M".to_string(),
+        f if (24.8..=25.0).contains(&f) => "12M".to_string(),
+        f if (28.0..=29.7).contains(&f) => "10M".to_string(),
+        f if (50.0..=54.0).contains(&f) => "6M".to_string(),
+        f if (70.0..=70.5).contains(&f) => "4M".to_string(),
+        f if (144.0..=148.0).contains(&f) => "2M".to_string(),
+        f if (220.0..=225.0).contains(&f) => "1.25M".to_string(),
+        f if (420.0..=450.0).contains(&f) => "70CM".to_string(),
+        f if (902.0..=928.0).contains(&f) => "33CM".to_string(),
+        f if (1240.0..=1300.0).contains(&f) => "23CM".to_string(),
+        _ => format!("{:.3}", mhz),
+    }
 }

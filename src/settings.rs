@@ -50,7 +50,17 @@ pub struct StationConfig {
     /// Auto-send 73 after exchange
     pub auto_73: bool,
     /// Band selection (e.g., "2M", "70CM", "144.350")
-    pub band: Option<String>,     // 🟢 ADD THIS FIELD
+    pub band: Option<String>,
+    /// Rig control enabled
+    pub hamlib_enabled: bool,
+    /// Rig model ID (e.g., "3081" for IC-9700)
+    pub rig_model: String,
+    /// Serial port (e.g., "/dev/cu.usbserial-1420")
+    pub rig_port: String,
+    /// Baud rate
+    pub rig_baud: String,
+    /// TX audio output level (0.0 - 1.0)
+    pub tx_level: f32,
 }
 
 impl Default for StationConfig {
@@ -62,7 +72,12 @@ impl Default for StationConfig {
             use_grid_in_cq: false,
             auto_reply_cq: false,
             auto_73: false,
-            band: Some("2M".to_string()), // 🟢 ADD THIS LINE
+            band: Some("2M".to_string()),
+            hamlib_enabled: false,
+            rig_model: String::new(),
+            rig_port: String::new(),
+            rig_baud: "19200".to_string(),
+            tx_level: 0.4,
         }
     }
 }

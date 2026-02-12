@@ -50,7 +50,6 @@ async fn run_hamlib_client(
     update_tx: mpsc::UnboundedSender<HamlibUpdate>,
 ) {
     loop {
-        // Silent connection attempt to avoid log spam on startup
         match TcpStream::connect(&addr).await {
             Ok(mut stream) => {
                 info!("[Hamlib] Connected to rigctld at {}!", addr);
@@ -58,12 +57,19 @@ async fn run_hamlib_client(
                 let mut reader = BufReader::new(reader);
                 let mut buf = String::new();
 
-                // Send initial query to verify life
                 if let Err(_) = writer.write_all(b"f\n").await { continue; }
 
                 loop {
                     tokio::select! {
-                        Some(cmd) = cmd_rx.recv() => {
+                        cmd_opt = cmd_rx.recv() => {
+                            let cmd = match cmd_opt {
+                                Some(c) => c,
+                                None => {
+                                    info!("[Hamlib] Command channel closed, shutting down");
+                                    return; // Exit the entire task
+                                }
+                            };
+
                             let cmd_str = match cmd {
                                 HamlibCmd::Ptt(true) => "T 1\n",
                                 HamlibCmd::Ptt(false) => "T 0\n",
@@ -77,10 +83,9 @@ async fn run_hamlib_client(
                                 break; // Break inner loop to trigger reconnect
                             }
                             
-                            // Consume response
                             if matches!(cmd, HamlibCmd::Ptt(_)) {
                                 buf.clear();
-                                let _ = reader.read_line(&mut buf).await; // "RPRT 0"
+                                let _ = reader.read_line(&mut buf).await;
                             } 
                             else if matches!(cmd, HamlibCmd::GetFreq) {
                                 buf.clear();
@@ -91,13 +96,15 @@ async fn run_hamlib_client(
                                 }
                             }
                         }
-                        else => break, // Channel closed
                     }
                 }
             }
             Err(_) => {
-                // Squelch error logs if user isn't using Hamlib
-                // Just retry silently every 5 seconds
+                // Check if channel is closed before retrying
+                if cmd_rx.is_closed() {
+                    info!("[Hamlib] Command channel closed, shutting down");
+                    return;
+                }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }

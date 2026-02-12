@@ -69,7 +69,9 @@ pub async fn run_receiver(
 
     let manager = DeviceManager::new().unwrap_or_else(|e| panic!("DeviceManager failed: {}", e));
     let device = if let Some(ref name) = cfg.input_device {
-        manager.get_input_device(Some(name)).unwrap_or_else(|_| manager.default_input_device().unwrap())
+        find_nth_device(name, true).unwrap_or_else(|| {
+            manager.get_input_device(Some(name)).unwrap_or_else(|_| manager.default_input_device().unwrap())
+        })
     } else {
         manager.default_input_device().unwrap()
     };
@@ -244,13 +246,13 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
             // 🟢 FORMAT 1: Try both Grid and Standard decode paths
             if pkt.format == 1 {
                 let is_general = is_general_addr(&pkt.addr_bits);
-                // Type field at bit positions 55,56 (0-indexed)
+                // Type field at bit positions 54,55 (0-indexed)
                 // [1,1] = Type 11 (CQ+Grid), [0,1] = Type 01 (Standard CQ/directed)
+                let b54 = pkt.info_bits.get(54).unwrap_or(&0);
                 let b55 = pkt.info_bits.get(55).unwrap_or(&0);
-                let b56 = pkt.info_bits.get(56).unwrap_or(&0);
                 
                 // 🟢 TRY 1: If type bits suggest Grid CQ, try grid decode first
-                if is_general && *b55 == 1 && *b56 == 1 {
+                if is_general && *b54 == 1 && *b55 == 1 {
                     if let Ok(grid_text) = codec.decode_cq_with_grid(&pkt.info_bits) {
                         let parts: Vec<&str> = grid_text.split_whitespace().collect();
                         let clean_call = parts.get(0).unwrap_or(&"?").to_string();
@@ -321,4 +323,69 @@ impl ChannelSimulator {
         else { self.samples_until_ping -= 1; }
         if self.envelope < 0.05 { 0.0 } else { self.envelope }
     }
+}
+
+/// Resolve a display name like "USB Audio CODEC (RX)" to the correct cpal device.
+/// Supports capability labels: (RX), (TX), (RX/TX) and numeric (1), (2).
+fn find_nth_device(display_name: &str, _is_input: bool) -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let (base_name, suffix) = parse_device_suffix(display_name);
+    let host = cpal::default_host();
+    
+    match suffix.as_str() {
+        "RX" => {
+            // Find the device with this name that has input capability
+            for dev in host.devices().ok()? {
+                if let Ok(name) = dev.name() {
+                    if name == base_name {
+                        let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                            || dev.default_input_config().is_ok();
+                        if has_in { return Some(dev); }
+                    }
+                }
+            }
+        }
+        "TX" => {
+            // Find the device that has output capability, or if undetectable,
+            // the one that does NOT have input capability (inferred TX)
+            let mut fallback: Option<cpal::Device> = None;
+            for dev in host.devices().ok()? {
+                if let Ok(name) = dev.name() {
+                    if name == base_name {
+                        let has_out = dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                            || dev.default_output_config().is_ok();
+                        if has_out { return Some(dev); }
+                        let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                            || dev.default_input_config().is_ok();
+                        if !has_in && fallback.is_none() { fallback = Some(dev); }
+                    }
+                }
+            }
+            if let Some(fb) = fallback { return Some(fb); }
+        }
+        _ => {
+            // Numeric index or no suffix — find Nth occurrence
+            let occurrence: usize = suffix.parse().unwrap_or(1);
+            let mut count = 0usize;
+            for dev in host.devices().ok()? {
+                if let Ok(name) = dev.name() {
+                    if name == base_name {
+                        count += 1;
+                        if count == occurrence { return Some(dev); }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_device_suffix(display_name: &str) -> (String, String) {
+    if let Some(pos) = display_name.rfind(" (") {
+        if display_name.ends_with(')') {
+            let suffix = &display_name[pos+2..display_name.len()-1];
+            return (display_name[..pos].to_string(), suffix.to_string());
+        }
+    }
+    (display_name.to_string(), "1".to_string())
 }

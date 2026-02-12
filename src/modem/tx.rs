@@ -27,6 +27,7 @@ struct TxAudioCfg {
     output_device: Option<String>,
     sample_rate: u32,
     buffer_size: usize,
+    output_level: f32,
     my_call: String,
     their_call: String,
 }
@@ -37,6 +38,7 @@ impl Default for TxAudioCfg {
             output_device: None,
             sample_rate: 48_000,
             buffer_size: 1024,
+            output_level: 0.4,
             my_call: String::new(),
             their_call: String::new(),
         }
@@ -55,13 +57,14 @@ pub async fn run_transmitter_task(
         match req {
             TxRequest::ApplyAudio {
                 output_device,
-                output_level: _, 
+                output_level,
                 sample_rate,
                 buffer_size,
                 my_call,
                 their_call,
             } => {
                 cfg.output_device = output_device;
+                cfg.output_level = output_level;
                 cfg.sample_rate = sample_rate;
                 cfg.buffer_size = buffer_size;
                 cfg.my_call = my_call.clone();
@@ -100,7 +103,7 @@ pub async fn run_transmitter_task(
                     }
                 };
 
-                let output_scalar = 0.707;
+                let output_scalar = cfg.output_level;
                 let scaled: Vec<f32> = waveform.iter().map(|&s| s * output_scalar).collect();
 
                 if let Err(e) = audio_tx.send(scaled.clone()) {
@@ -149,7 +152,7 @@ pub async fn run_transmitter_task(
                     }
                 };
 
-                let output_scalar = 0.707;
+                let output_scalar = cfg.output_level;
                 let scaled: Vec<f32> = waveform.iter().map(|&s| s * output_scalar).collect();
 
                 if let Err(e) = audio_tx.send(scaled.clone()) {
@@ -227,7 +230,9 @@ fn generate_transmission_from_bits(
 fn build_output_and_sender(cfg: &TxAudioCfg) -> Result<(AudioOutput, mpsc::UnboundedSender<Vec<f32>>)> {
     let manager = DeviceManager::new()?;
     let device = if let Some(ref name) = cfg.output_device {
-        manager.get_output_device(Some(name)).or_else(|_| manager.default_output_device())?
+        find_nth_output_device(name).unwrap_or_else(|| {
+            manager.get_output_device(Some(name)).or_else(|_| manager.default_output_device()).unwrap()
+        })
     } else {
         manager.default_output_device()?
     };
@@ -328,4 +333,66 @@ fn message_from_short_format2(s: &str, my_call: &str, their_call: &str) -> Resul
         "73" => Message::seventy_three(my_call, their_call).map_err(|e| anyhow!("{e}")),
         _ => Message::format2(my_call, their_call, s).map_err(|e| anyhow!("{e}")),
     }
+}
+
+/// Resolve a display name like "USB Audio CODEC (2)" to the 2nd cpal output device
+fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let (base_name, suffix) = parse_device_suffix(display_name);
+    let host = cpal::default_host();
+    
+    match suffix.as_str() {
+        "TX" | "RX/TX" => {
+            // Find device with output capability, or if undetectable,
+            // the one that does NOT have input capability (inferred TX)
+            let mut fallback: Option<cpal::Device> = None;
+            for dev in host.devices().ok()? {
+                if let Ok(name) = dev.name() {
+                    if name == base_name {
+                        let has_out = dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                            || dev.default_output_config().is_ok();
+                        if has_out { return Some(dev); }
+                        let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                            || dev.default_input_config().is_ok();
+                        if !has_in && fallback.is_none() { fallback = Some(dev); }
+                    }
+                }
+            }
+            if let Some(fb) = fallback { return Some(fb); }
+        }
+        "RX" => {
+            for dev in host.devices().ok()? {
+                if let Ok(name) = dev.name() {
+                    if name == base_name {
+                        let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                            || dev.default_input_config().is_ok();
+                        if has_in { return Some(dev); }
+                    }
+                }
+            }
+        }
+        _ => {
+            let occurrence: usize = suffix.parse().unwrap_or(1);
+            let mut count = 0usize;
+            for dev in host.devices().ok()? {
+                if let Ok(name) = dev.name() {
+                    if name == base_name {
+                        count += 1;
+                        if count == occurrence { return Some(dev); }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_device_suffix(display_name: &str) -> (String, String) {
+    if let Some(pos) = display_name.rfind(" (") {
+        if display_name.ends_with(')') {
+            let suffix = &display_name[pos+2..display_name.len()-1];
+            return (display_name[..pos].to_string(), suffix.to_string());
+        }
+    }
+    (display_name.to_string(), "1".to_string())
 }

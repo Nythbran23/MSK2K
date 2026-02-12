@@ -86,6 +86,7 @@ pub enum UiCmd {
     },
     Stop,
     SetBand(String),
+    SetTxLevel(f32),
     PublicTx {
         my_call: String,
         text: String,
@@ -120,6 +121,10 @@ pub enum UiEvent {
         input_device: Option<String>,
         output_device: Option<String>,
     },
+    RigFreqChanged {
+        freq_hz: u64,
+    },
+    TxActive(bool),
 }
 
 pub struct EngineHandle {
