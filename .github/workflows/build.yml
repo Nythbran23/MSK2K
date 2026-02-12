@@ -1,4 +1,4 @@
-name: Build MSK2K
+name: Build and Release
 
 on:
   push:
@@ -13,55 +13,111 @@ env:
 
 jobs:
   build:
-    name: Build - ${{ matrix.os }}
+    name: Package for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
+          # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: msk2k-linux
+            artifact_name: MSK2K_Linux.zip
             asset_name: msk2k
+          # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: msk2k-windows.exe
+            artifact_name: MSK2K_Windows.zip
             asset_name: msk2k.exe
+          # macOS (Apple Silicon)
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: msk2k-macos
+            artifact_name: MSK2K_macOS.zip
             asset_name: msk2k
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install Linux Dependencies
+    # --- 1. Install System Dependencies ---
+    - name: Install Linux Deps
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update
-        sudo apt-get install -y libasound2-dev libudev-dev pkg-config libx11-dev libasound2t64 libwayland-dev libxkbcommon-dev
+        sudo apt-get install -y libasound2-dev libudev-dev pkg-config libx11-dev libasound2t64 libwayland-dev libxkbcommon-dev libhamlib-dev hamlib-utils
 
+    - name: Install macOS Deps
+      if: runner.os == 'macOS'
+      run: brew install hamlib
+
+    # --- 2. Install Rust ---
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: ${{ matrix.target }}
 
+    # --- 3. Build Your App ---
     - name: Build Release
       run: cargo build --release --target ${{ matrix.target }} --verbose
 
-    - name: Rename Binary (Linux/Mac)
-      if: runner.os != 'Windows'
-      run: mv target/${{ matrix.target }}/release/${{ matrix.asset_name }} target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+    # --- 4. PREPARE PACKAGE (The "Batteries Included" Step) ---
+    
+    # LINUX PACKAGE
+    - name: Bundle Linux
+      if: runner.os == 'Linux'
+      run: |
+        mkdir -p release_pkg/tools
+        # Copy App
+        cp target/${{ matrix.target }}/release/${{ matrix.asset_name }} release_pkg/
+        # Copy Hamlib Driver
+        cp /usr/bin/rigctld release_pkg/tools/
+        # Zip it
+        cd release_pkg
+        zip -r ../${{ matrix.artifact_name }} .
 
-    - name: Rename Binary (Windows)
+    # MACOS PACKAGE
+    - name: Bundle macOS
+      if: runner.os == 'macOS'
+      run: |
+        mkdir -p release_pkg/tools
+        # Copy App
+        cp target/${{ matrix.target }}/release/${{ matrix.asset_name }} release_pkg/
+        # Find and Copy Hamlib Driver
+        cp $(brew --prefix)/bin/rigctld release_pkg/tools/
+        # Zip it
+        cd release_pkg
+        zip -r ../${{ matrix.artifact_name }} .
+
+    # WINDOWS PACKAGE (Complex because of DLLs)
+    - name: Bundle Windows
       if: runner.os == 'Windows'
-      run: mv target/${{ matrix.target }}/release/${{ matrix.asset_name }} target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+      shell: powershell
+      run: |
+        # 1. Download official Hamlib binaries for Windows
+        Invoke-WebRequest -Uri "https://github.com/Hamlib/Hamlib/releases/download/4.5.5/hamlib-w64-4.5.5.zip" -OutFile "hamlib.zip"
+        Expand-Archive -Path "hamlib.zip" -DestinationPath "hamlib_temp"
+        
+        # 2. Create folder structure
+        New-Item -ItemType Directory -Force -Path "release_pkg/tools"
+        
+        # 3. Copy Your App
+        Copy-Item "target/${{ matrix.target }}/release/${{ matrix.asset_name }}" -Destination "release_pkg/"
+        
+        # 4. Copy rigctld.exe to tools/
+        Copy-Item "hamlib_temp/hamlib-w64-4.5.5/bin/rigctld.exe" -Destination "release_pkg/tools/"
+        
+        # 5. Copy necessary DLLs next to your app (Critical for Windows!)
+        Copy-Item "hamlib_temp/hamlib-w64-4.5.5/bin/*.dll" -Destination "release_pkg/"
+        
+        # 6. Zip it
+        Compress-Archive -Path "release_pkg/*" -DestinationPath "${{ matrix.artifact_name }}"
 
+    # --- 5. Upload Artifacts ---
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact_name }}
-        path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        path: ${{ matrix.artifact_name }}
 
+  # --- 6. CREATE RELEASE (Only on Tag push) ---
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
@@ -77,14 +133,11 @@ jobs:
       with:
         path: artifacts
 
-    - name: List Artifacts
-      run: find artifacts -type f
-
-    - name: Create Release with Binaries
+    - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
         generate_release_notes: true
         files: |
-          artifacts/msk2k-linux/msk2k-linux
-          artifacts/msk2k-windows.exe/msk2k-windows.exe
-          artifacts/msk2k-macos/msk2k-macos
+          artifacts/MSK2K_Linux.zip/MSK2K_Linux.zip
+          artifacts/MSK2K_Windows.zip/MSK2K_Windows.zip
+          artifacts/MSK2K_macOS.zip/MSK2K_macOS.zip
