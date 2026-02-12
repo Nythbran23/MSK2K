@@ -3,6 +3,7 @@ pub mod bus;
 pub mod runtime;
 pub mod report_calc;
 pub mod accumulator;
+pub mod hamlib;
 
 // Re-export the “public API” that GUI code expects.
 pub use bus::{EngineHandle, SlotParity, SlotPeriod, UiCmd, UiEvent};
