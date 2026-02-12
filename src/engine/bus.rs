@@ -27,6 +27,14 @@ pub enum UiCmd {
     SetSlotParity(SlotParity),
     SetAutoQso(bool),
     ApplyAudio,
+    ConfigureHamlib { enabled: bool, address: String },
+    
+    ConfigureLauncher { 
+        enable_launcher: bool, 
+        rig_model: String, 
+        serial_port: String, 
+        baud_rate: u32 
+    },
     Listen {
         my_call: String,
         their_call: String,

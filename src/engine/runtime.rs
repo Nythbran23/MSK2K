@@ -5,6 +5,9 @@ use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use crate::engine::hamlib::{HamlibClient, HamlibUpdate};
+use std::process::{Command, Child};
+use std::path::PathBuf;
 
 use msk2k_dsp::callsign::CallsignCodec;
 // 🟢 Import Rendered enum
@@ -20,7 +23,30 @@ pub fn start() -> EngineHandle {
     let (cmds, cmd_rx) = mpsc::unbounded_channel::<UiCmd>();
     let (evt_tx, events) = mpsc::unbounded_channel::<UiEvent>();
 
-    rt.spawn(async move {
+    fn get_rigctld_path() -> String {
+    // 1. Check relative to the executable (for bundled apps)
+    if let Ok(mut path) = std::env::current_exe() {
+        path.pop(); // Remove "msk2k" filename
+        // Check for ./rigctld
+        let local_path = path.join("rigctld"); 
+        if local_path.exists() {
+            log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", local_path);
+            return local_path.to_string_lossy().to_string();
+        }
+        
+        // Check for ./tools/rigctld (Clean folder structure)
+        let tools_path = path.join("tools").join("rigctld");
+        if tools_path.exists() {
+            log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", tools_path);
+            return tools_path.to_string_lossy().to_string();
+        }
+    }
+
+    // 2. Fallback: Assume user installed it globally (Homebrew/Linux package)
+    log::info!("[LAUNCHER] Using system rigctld (not bundled)");
+    "rigctld".to_string()
+}
+rt.spawn(async move {
         if let Err(e) = run_runtime(cmd_rx, evt_tx).await {
             log::error!("engine runtime crashed: {e}");
         }
@@ -110,7 +136,30 @@ fn save_config(cfg: &AppConfig) {
         log::warn!("Failed to save config: {}", e);
     }
 }
+fn get_rigctld_path() -> String {
+    // 1. Check relative to the executable (for bundled apps)
+    if let Ok(mut path) = std::env::current_exe() {
+        path.pop(); // Remove "msk2k" filename
+        
+        // Check for ./rigctld
+        let local_path = path.join("rigctld"); 
+        if local_path.exists() {
+            log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", local_path);
+            return local_path.to_string_lossy().to_string();
+        }
+        
+        // Check for ./tools/rigctld (Clean folder structure)
+        let tools_path = path.join("tools").join("rigctld");
+        if tools_path.exists() {
+            log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", tools_path);
+            return tools_path.to_string_lossy().to_string();
+        }
+    }
 
+    // 2. Fallback: Assume user installed it globally (Homebrew/Linux package)
+    log::info!("[LAUNCHER] Using system rigctld (not bundled)");
+    "rigctld".to_string()
+}
 async fn run_runtime(
     mut cmd_rx: mpsc::UnboundedReceiver<UiCmd>,
     evt_tx: mpsc::UnboundedSender<UiEvent>,
@@ -160,6 +209,13 @@ async fn run_runtime(
     let mut rx_needs_restart: bool = true;
     let mut diag_tick: u64 = 0; // 🔍 DIAGNOSTIC: heartbeat counter
 
+    let (ham_update_tx, _ham_update_rx) = mpsc::unbounded_channel();
+    let mut hamlib: Option<HamlibClient> = Some(HamlibClient::new("127.0.0.1:4532".to_string(), ham_update_tx));
+
+    // 🟢 2. Initialize Launcher Process Holder
+    let mut rigctld_process: Option<Child> = None;
+
+
     // 🟢 AUTO-START: If valid config exists, start LISTENING immediately.
     if !qso_engine.my_call.is_empty() && input_device.is_some() {
         log::info!("⚡ Auto-starting RX with saved configuration...");
@@ -179,16 +235,18 @@ async fn run_runtime(
         running = true;
         rx_needs_restart = true; // Forces restart_rx in the first loop tick
 
-        let _ = evt_tx.send(UiEvent::Info(format!(
-            "Auto-started: {}",
-            qso_engine.my_call
-        )));
+        let _ = evt_tx.send(UiEvent::Info(format!("Auto-started: {}", qso_engine.my_call)));
     } else {
         log::info!("🚀 Engine started (Waiting for setup)");
         let _ = evt_tx.send(UiEvent::Info(
             "Enter callsign and press LISTEN".into(),
         ));
     }
+    
+    let (ham_update_tx, _ham_update_rx) = mpsc::unbounded_channel();
+    // Connect to localhost:4532 (Default rigctld port).
+    // This runs in the background and won't crash if the radio isn't there.
+    let mut hamlib: Option<HamlibClient> = Some(HamlibClient::new("127.0.0.1:4532".to_string(), ham_update_tx));
 
     loop {
         tokio::select! {
@@ -248,6 +306,8 @@ async fn run_runtime(
                     }
 
                     if should_tx {
+                        if let Some(h) = &hamlib { h.set_ptt(true); }
+
                         if let Some(payload) = qso_engine.next_tx() {
                             let mut final_payload = payload;
 
@@ -325,6 +385,11 @@ async fn run_runtime(
                             }
                         }
                     }
+                        else {
+                        // If we are NOT supposed to be transmitting, ensure PTT is OFF.
+                        // This runs repeatedly every 50ms, keeping the radio in RX.
+                        if let Some(h) = &hamlib { h.set_ptt(false); }
+                    }    
                 }
             }
 
@@ -336,6 +401,37 @@ async fn run_runtime(
                     UiCmd::SetSlotParity(p) => { slot_parity_cfg = p; }
                     UiCmd::SetAutoQso(on) => { auto_qso = on; }
                     
+                    UiCmd::ConfigureHamlib { enabled, address } => {
+                        if enabled {
+                            let (tx, _rx) = mpsc::unbounded_channel(); 
+                            hamlib = Some(HamlibClient::new(address, tx));
+                        } else {
+                            hamlib = None;
+                        }
+                    }
+
+                    // 2. Configure Launcher
+                    UiCmd::ConfigureLauncher { enable_launcher, rig_model, serial_port, baud_rate } => {
+                        // Always kill old process first
+                        if let Some(mut child) = rigctld_process.take() {
+                            let _ = child.kill();
+                        }
+
+                        if enable_launcher && !serial_port.is_empty() {
+                            log::info!("[LAUNCHER] Starting rigctld: Model={} Port={}", rig_model, serial_port);
+                            
+                            // Spawning the process
+                            let rig_cmd = get_rigctld_path();
+                            let child = Command::new(rig_cmd)
+                                .args(&["-m", &rig_model, "-r", &serial_port, "-s", &baud_rate.to_string()])
+                                .spawn();
+
+                            match child {
+                                Ok(c) => rigctld_process = Some(c),
+                                Err(e) => log::error!("[LAUNCHER] Failed to start: {}", e),
+                            }
+                        }
+                    }
                     UiCmd::ApplyAudio => {
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
                             output_device: output_device.clone(),
@@ -503,6 +599,7 @@ async fn run_runtime(
 
                     UiCmd::Stop => {
                         running = false;
+                        if let Some(h) = &hamlib { h.set_ptt(false); }
                         let (_, events) = qso_engine.on_intent(Intent::Abort);
                         process_qso_events(&events, &evt_tx, &rx_config_tx);
                         observed_remote_slot = None;

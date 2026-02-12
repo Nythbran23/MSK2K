@@ -2,6 +2,7 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
 use std::collections::HashMap;
+use std::process::Command;
 
 use crate::engine::{EngineHandle, SlotParity, SlotPeriod, UiCmd, UiEvent};
 use crate::engine::report_calc::report_from_correlation;
@@ -10,7 +11,7 @@ use crate::qso::adif::{AdifLogger, QsoRecord};
 pub fn run_gui() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 400.0])
+            .with_inner_size([1000.0, 600.0])
             .with_min_inner_size([500.0, 250.0]),
         ..Default::default()
     };
@@ -38,10 +39,10 @@ struct Msk2kEguiApp {
     my_call: String,
     their_call: String,
     band: String,
-    custom_band_input: String, // 🟢 NEW: Separate input field for custom band
+    custom_band_input: String,
     slot_parity: SlotParity,
     slot_period: SlotPeriod,
-    saved_slot_parity: Option<SlotParity>, // 🟢 NEW: Save original slot when entering QSO
+    saved_slot_parity: Option<SlotParity>,
     in_devs: Vec<String>,
     out_devs: Vec<String>,
     sel_in: Option<String>,
@@ -63,6 +64,17 @@ struct Msk2kEguiApp {
     adif_logger: AdifLogger,
     current_state: String,
     config: crate::settings::Config,
+    
+    // Rig Control State
+    hamlib_enabled: bool,
+    hamlib_address: String,
+    launcher_enabled: bool,
+    rig_model: String,
+    rig_port: String,
+    rig_baud: String,
+    available_ports: Vec<String>,
+    rig_list: Vec<(String, String)>, // Stores (ID, Name) e.g. ("3081", "Icom IC-9700")
+    rig_search: String,
 }
 
 impl Msk2kEguiApp {
@@ -73,18 +85,35 @@ impl Msk2kEguiApp {
         let qso_log = adif_logger.read_all().unwrap_or_default();
         let config_path = crate::settings::default_config_path();
         let config = crate::settings::Config::load(&config_path).unwrap_or_default();
+        let mut rig_list = Vec::new();
+        // Try running "rigctl -l"
+        if let Ok(output) = Command::new("rigctl").arg("-l").output() {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                for line in text.lines() {
+                    // Skip header or short lines
+                    if line.starts_with(" Rig") || line.len() < 10 { continue; }
+                    
+                    // Parse: "3081  Icom  IC-9700 ..."
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        let id = parts[0].to_string();
+                        // Combine Mfg + Model for display (e.g. "Icom IC-9700")
+                        let name = format!("{} {}", parts[1], parts[2]); 
+                        rig_list.push((id, name));
+                    }
+                }
+            }
+        }
 
         Self {
             engine,
             my_call: "NOCALL".to_string(),
             their_call: String::new(),
-            // 🟢 Band is UI-local only, defaults to "2M"
-            // TODO: Add `pub band: Option<String>` to StationConfig to enable persistence
             band: "2M".to_string(),
             custom_band_input: String::new(),
             slot_parity: SlotParity::Odd,
             slot_period: SlotPeriod::S15,
-            saved_slot_parity: None, // 🟢 NEW: No saved slot initially
+            saved_slot_parity: None,
             in_devs,
             out_devs,
             sel_in: None,
@@ -106,6 +135,24 @@ impl Msk2kEguiApp {
             adif_logger,
             current_state: "Idle".to_string(),
             config,
+            
+            // Rig Control Defaults
+            hamlib_enabled: true, 
+            hamlib_address: "127.0.0.1:4532".to_string(),
+            launcher_enabled: false,
+            rig_model: "3081".to_string(), // Default to IC-9700
+            rig_port: String::new(),
+            rig_baud: "19200".to_string(),
+            available_ports: Vec::new(),
+            rig_list,
+            rig_search: String::new(),
+        }
+    }
+
+    fn refresh_serial_ports(&mut self) {
+        if let Ok(ports) = serialport::available_ports() {
+            self.available_ports = ports.into_iter().map(|p| p.port_name).collect();
+            self.available_ports.sort();
         }
     }
 
@@ -134,64 +181,55 @@ impl Msk2kEguiApp {
                         if self.out_devs.contains(&out_d) { self.sel_out = Some(out_d); }
                     }
 
-                    // 🟢 Don't send Listen command - runtime already auto-starts if config is valid
-                    // Just set UI state to reflect that we're listening
                     if !self.my_call.is_empty() && self.my_call != "NOCALL" && self.sel_in.is_some() {
                         self.is_listening = true;
                         self.current_state = "Listening".to_string();
                         log::info!("[UI] Auto-start detected, UI is_listening = true");
                     }
                 },
+                UiEvent::RxText { text, snr, utc_ms, rx_slot } => {
+                    self.last_corr = snr.unwrap_or(self.last_corr);
+                    self.last_rx_slot = Some(rx_slot);
+                    
+                    let ts = {
+                        let secs = (utc_ms / 1000) as i64;
+                        chrono::DateTime::from_timestamp(secs, 0)
+                            .map(|dt| dt.format("%H:%M").to_string())
+                            .unwrap_or_default()
+                    };
+                    
+                    let key = text.to_uppercase().trim().to_string();
+                    let count = self.decode_counts.entry(key.clone()).or_insert(0);
+                    *count += 1;
+                    
+                    let display = format!("{} ({})", text, count);
+                    let stamp = self.in_active_qso || !self.their_call.is_empty();
+                    let is_cq = key.contains("CQ");
 
-                // src/gui/app.rs
-
-UiEvent::RxText { text, snr, utc_ms, rx_slot } => {
-    self.last_corr = snr.unwrap_or(self.last_corr);
-    self.last_rx_slot = Some(rx_slot);
-    
-    let ts = {
-        let secs = (utc_ms / 1000) as i64;
-        chrono::DateTime::from_timestamp(secs, 0)
-            .map(|dt| dt.format("%H:%M").to_string())
-            .unwrap_or_default()
-    };
-    
-    let key = text.to_uppercase().trim().to_string();
-    let count = self.decode_counts.entry(key.clone()).or_insert(0);
-    *count += 1;
-    
-    let display = format!("{} ({})", text, count);
-    let stamp = self.in_active_qso || !self.their_call.is_empty();
-    let is_cq = key.contains("CQ");
-
-    // 🟢 STRICT ROUTING LOGIC
-    if is_cq {
-        // 1. CQs go ONLY to the SPOTS Log
-        if *count == 1 {
-            let _ = push_cap_entry(&mut self.cq_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone() });
-            self.cq_log_index.insert(key.clone(), self.cq_log.len().saturating_sub(1));
-        } else if let Some(&idx) = self.cq_log_index.get(&key) {
-            if idx < self.cq_log.len() { 
-                self.cq_log[idx].text = display; 
-                self.cq_log[idx].timestamp = ts;
-                if stamp { self.cq_log[idx].colored = true; } 
-            }
-        }
-    } else {
-        // 2. Private Messages go ONLY to the RX Log (QSO Window)
-        // This keeps your QSO window clean of random CQs.
-        if *count == 1 {
-            let _ = push_cap_entry(&mut self.rx_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone() });
-            self.decode_log_index.insert(key.clone(), self.rx_log.len().saturating_sub(1));
-        } else if let Some(&idx) = self.decode_log_index.get(&key) {
-            if idx < self.rx_log.len() { 
-                self.rx_log[idx].text = display; 
-                self.rx_log[idx].timestamp = ts;
-                if stamp { self.rx_log[idx].colored = true; } 
-            }
-        }
-    }
-}
+                    if is_cq {
+                        if *count == 1 {
+                            let _ = push_cap_entry(&mut self.cq_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone() });
+                            self.cq_log_index.insert(key.clone(), self.cq_log.len().saturating_sub(1));
+                        } else if let Some(&idx) = self.cq_log_index.get(&key) {
+                            if idx < self.cq_log.len() { 
+                                self.cq_log[idx].text = display; 
+                                self.cq_log[idx].timestamp = ts;
+                                if stamp { self.cq_log[idx].colored = true; } 
+                            }
+                        }
+                    } else {
+                        if *count == 1 {
+                            let _ = push_cap_entry(&mut self.rx_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone() });
+                            self.decode_log_index.insert(key.clone(), self.rx_log.len().saturating_sub(1));
+                        } else if let Some(&idx) = self.decode_log_index.get(&key) {
+                            if idx < self.rx_log.len() { 
+                                self.rx_log[idx].text = display; 
+                                self.rx_log[idx].timestamp = ts;
+                                if stamp { self.rx_log[idx].colored = true; } 
+                            }
+                        }
+                    }
+                }
                 UiEvent::TxText { text } => { push_cap_entry(&mut self.tx_log, LogEntry { text, colored: self.in_active_qso || !self.their_call.is_empty(), timestamp: String::new() }); }
                 UiEvent::State(s) => {
                     self.current_state = s.clone();
@@ -204,19 +242,15 @@ UiEvent::RxText { text, snr, utc_ms, rx_slot } => {
                     if !callsign.is_empty() { 
                         self.color_history_for_call(&callsign); 
                     }
-                    // Grid is tracked in runtime, just ignore here for now
                     let _ = grid; 
                 }
                 UiEvent::TxSlotChanged { slot } => {
-                    // 🟢 Save the original slot before changing (only once per QSO)
                     if self.saved_slot_parity.is_none() {
                         self.saved_slot_parity = Some(self.slot_parity);
                     }
-                    // Update UI to show we're now on their slot
                     self.slot_parity = slot;
                 }
                 UiEvent::QsoLogged { record } => {
-                    // 🟢 Update record with UI's current band value (purely local, not in runtime)
                     let mut updated_record = record;
                     updated_record.band = self.band.clone();
                     
@@ -226,7 +260,6 @@ UiEvent::RxText { text, snr, utc_ms, rx_slot } => {
                     self.in_active_qso = false;
                     self.reset_dedupe();
                     
-                    // 🟢 Restore original slot after QSO ends
                     if let Some(saved) = self.saved_slot_parity.take() {
                         self.slot_parity = saved;
                     }
@@ -252,25 +285,23 @@ impl eframe::App for Msk2kEguiApp {
 
         if self.settings_open {
             let mut close = false;
-            egui::Window::new("⚙ Settings").collapsible(false).resizable(false).show(ctx, |ui| {
+            // 🟢 WIDER SETTINGS WINDOW
+            egui::Window::new("⚙ Settings").collapsible(false).resizable(true).default_width(450.0).show(ctx, |ui| {
                 ui.heading("Station Setup");
                 ui.horizontal(|ui| { 
                     ui.label("My Callsign:"); 
                     
-                    // 🟢 Determine max length based on grid mode
                     let max_len = if self.config.station.use_grid_in_cq { 7 } else { 10 };
                     
                     if ui.text_edit_singleline(&mut self.my_call).changed() { 
                         self.my_call = self.my_call.to_uppercase();
-                        // 🟢 Enforce character limit
                         if self.my_call.len() > max_len {
                             self.my_call.truncate(max_len);
                         }
                     }
                     
-                    // 🟢 Show character count
                     let count_color = if self.my_call.len() == max_len { 
-                        egui::Color32::from_rgb(255, 180, 0) // Orange when at limit
+                        egui::Color32::from_rgb(255, 180, 0) 
                     } else { 
                         egui::Color32::GRAY 
                     };
@@ -286,7 +317,6 @@ impl eframe::App for Msk2kEguiApp {
                 ui.heading("Maidenhead Locator");
                 ui.horizontal(|ui| {
                     let alphabet: Vec<char> = "ABCDEFGHIJKLMNOPQR".chars().collect();
-                    // Field 1 (A-R)
                     egui::ComboBox::from_id_salt("grid_f1")
                         .selected_text(alphabet[self.config.station.grid_indices[0]].to_string())
                         .width(40.0)
@@ -295,7 +325,6 @@ impl eframe::App for Msk2kEguiApp {
                                 ui.selectable_value(&mut self.config.station.grid_indices[0], i, c.to_string());
                             }
                         });
-                    // Field 2 (A-R)
                     egui::ComboBox::from_id_salt("grid_f2")
                         .selected_text(alphabet[self.config.station.grid_indices[1]].to_string())
                         .width(40.0)
@@ -304,7 +333,6 @@ impl eframe::App for Msk2kEguiApp {
                                 ui.selectable_value(&mut self.config.station.grid_indices[1], i, c.to_string());
                             }
                         });
-                    // Square 1 (0-9)
                     egui::ComboBox::from_id_salt("grid_s1")
                         .selected_text(self.config.station.grid_indices[2].to_string())
                         .width(40.0)
@@ -313,7 +341,6 @@ impl eframe::App for Msk2kEguiApp {
                                 ui.selectable_value(&mut self.config.station.grid_indices[2], n, n.to_string());
                             }
                         });
-                    // Square 2 (0-9)
                     egui::ComboBox::from_id_salt("grid_s2")
                         .selected_text(self.config.station.grid_indices[3].to_string())
                         .width(40.0)
@@ -326,7 +353,6 @@ impl eframe::App for Msk2kEguiApp {
 
                 ui.checkbox(&mut self.config.station.use_grid_in_cq, "Encode Grid in CQ (MSK2K Mode)");
                 
-                // 🟢 Re-validate callsign length when grid mode changes
                 let max_call_len = if self.config.station.use_grid_in_cq { 7 } else { 10 };
                 if self.my_call.len() > max_call_len {
                     self.my_call.truncate(max_call_len);
@@ -334,7 +360,79 @@ impl eframe::App for Msk2kEguiApp {
                 
                 ui.add_space(5.0);
                 ui.label(egui::RichText::new("Note: Grid mode limits callsign to 7 characters.").small().color(egui::Color32::GRAY));
+                
+                // 🟢 RIG CONTROL SECTION
+                ui.separator();
+                ui.heading("Rig Control (Hamlib)");
+                
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.hamlib_enabled, "Enable CAT Control");
+                });
 
+                if self.hamlib_enabled {
+                    ui.indent("cat_indent", |ui| {
+                        ui.checkbox(&mut self.launcher_enabled, "Auto-Start Rigctld (Embedded)");
+                        
+                        if self.launcher_enabled {
+                            egui::Grid::new("launcher_grid").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                                // 🟢 NEW RIG SELECTOR
+                                ui.label("Rig Selection:");
+                                ui.vertical(|ui| {
+                                    // 1. Search Box
+                                    ui.text_edit_singleline(&mut self.rig_search)
+                                        .on_hover_text("Type your radio name (e.g. '7300') to filter");
+                                    
+                                    // 2. Dropdown
+                                    let current_name = self.rig_list.iter()
+                                        .find(|(id, _)| id == &self.rig_model)
+                                        .map(|(_, name)| name.clone())
+                                        .unwrap_or_else(|| format!("ID: {}", self.rig_model));
+
+                                    egui::ComboBox::from_id_salt("rig_select")
+                                        .selected_text(current_name)
+                                        .width(250.0)
+                                        .show_ui(ui, |ui| {
+                                            // Filter the massive list based on user typing
+                                            let search_upper = self.rig_search.to_uppercase();
+                                            for (id, name) in &self.rig_list {
+                                                if self.rig_search.is_empty() || name.to_uppercase().contains(&search_upper) || id.contains(&search_upper) {
+                                                    if ui.selectable_value(&mut self.rig_model, id.clone(), name).clicked() {
+                                                        // Auto-clear search on select if you want
+                                                    }
+                                                }
+                                            }
+                                        });
+                                });
+                                ui.end_row();
+
+                                ui.label("Serial Port:");
+                                ui.horizontal(|ui| {
+                                    egui::ComboBox::from_id_salt("ser_port")
+                                        .selected_text(&self.rig_port)
+                                        .width(200.0)
+                                        .show_ui(ui, |ui| {
+                                            for p in &self.available_ports {
+                                                ui.selectable_value(&mut self.rig_port, p.clone(), p);
+                                            }
+                                        });
+                                    if ui.button("🔄").clicked() { self.refresh_serial_ports(); }
+                                });
+                                ui.end_row();
+
+                                ui.label("Baud Rate:");
+                                ui.text_edit_singleline(&mut self.rig_baud);
+                                ui.end_row();
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label("Network Address:");
+                                ui.text_edit_singleline(&mut self.hamlib_address);
+                            });
+                            ui.label(egui::RichText::new("Ensure 'rigctld' is running externally.").small().italics().color(egui::Color32::GRAY));
+                        }
+                    });
+                }
+                
                 ui.separator();
                 ui.heading("Audio Hardware");
                 ui.label("Input Device:");
@@ -355,13 +453,31 @@ impl eframe::App for Msk2kEguiApp {
             });
             
             if close { 
-                // Send device selections to runtime FIRST (they're consumed before Listen runs)
-                let _ = self.engine.cmds.send(UiCmd::SetInputDevice(self.sel_in.clone()));
-                let _ = self.engine.cmds.send(UiCmd::SetOutputDevice(self.sel_out.clone()));
+                self.send_apply_audio();
                 
-                // 🟢 Listen handles: ApplyAudio + save config + restart RX — all in one.
-                // Do NOT send ApplyAudio separately, it causes a double-restart race
-                // that kills the receiver immediately after it starts.
+                // 1. Configure Hamlib
+                let address = if self.launcher_enabled { "127.0.0.1:4532".to_string() } else { self.hamlib_address.clone() };
+                let _ = self.engine.cmds.send(UiCmd::ConfigureHamlib { 
+                    enabled: self.hamlib_enabled, 
+                    address 
+                });
+
+                // 2. Configure Launcher
+                if self.launcher_enabled {
+                    let baud = self.rig_baud.parse().unwrap_or(19200);
+                    let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
+                        enable_launcher: true,
+                        rig_model: self.rig_model.clone(),
+                        serial_port: self.rig_port.clone(),
+                        baud_rate: baud,
+                    });
+                } else {
+                     let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
+                        enable_launcher: false, rig_model: String::new(), serial_port: String::new(), baud_rate: 0 
+                    });
+                }
+
+                // 🟢 3. RESTORE LISTENING MODE (This is the code you wanted!)
                 let _ = self.engine.cmds.send(UiCmd::Listen {
                     my_call: self.my_call.clone(),
                     their_call: String::new(),
@@ -370,20 +486,20 @@ impl eframe::App for Msk2kEguiApp {
                 self.is_listening = true;
                 self.is_calling_cq = false;
                 self.current_state = "Listening".to_string();
-                
-                // Save UI-side config to disk (grid settings etc.)
+
+                // 4. Save Config
                 let _ = self.config.save(&crate::settings::default_config_path());
                 self.settings_open = false; 
             }
         }
 
+        // ... (Rest of GUI: Top Bar, Actions, Logbook) ...
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&self.my_call).strong().size(22.0).color(egui::Color32::GRAY));
                 ui.add_space(20.0); ui.label("BAND:");
                 
-                // 🟢 Band selector with Custom option
-                let display_band = self.band.clone(); // Just show the band value directly
+                let display_band = self.band.clone(); 
                 let saved_selection = ui.visuals().selection.bg_fill;
                 let saved_inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
                 let slate = egui::Color32::from_rgb(70, 90, 110);
@@ -391,39 +507,28 @@ impl eframe::App for Msk2kEguiApp {
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = slate;
                 egui::ComboBox::from_id_salt("band").selected_text(&display_band).width(100.0).show_ui(ui, |ui| {
                     for b in &["6M", "4M", "2M", "70CM"] { 
-                        // 🟢 Band is UI-only, just update local state
-                        // TODO: Auto-save once StationConfig.band exists
                         ui.selectable_value(&mut self.band, b.to_string(), *b);
                     }
                     ui.separator();
                     
-                    // 🟢 Custom input
                     ui.label("Custom:");
                     let text_edit = egui::TextEdit::singleline(&mut self.custom_band_input)
                         .hint_text("e.g. 144.350")
                         .desired_width(80.0);
                     
                     let response = ui.add(text_edit);
-                    
-                    // Automatically give focus to keep dropdown open
                     response.request_focus();
                     
-                    // When user types
                     if response.changed() {
-                        // Limit to 7 characters and uppercase
                         if self.custom_band_input.len() > 7 {
                             self.custom_band_input.truncate(7);
                         }
                         self.custom_band_input = self.custom_band_input.to_uppercase();
                     }
                     
-                    // Check for Enter key press
                     if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.custom_band_input.is_empty() {
                         self.band = self.custom_band_input.clone();
                         self.custom_band_input.clear();
-                        // 🟢 TODO: Auto-save once StationConfig.band exists
-                        // self.config.station.band = Some(self.band.clone());
-                        // let _ = self.config.save(&crate::settings::default_config_path());
                     }
                     
                     ui.label(egui::RichText::new("Type and press Enter").small().italics().color(egui::Color32::GRAY));
@@ -447,19 +552,16 @@ impl eframe::App for Msk2kEguiApp {
                 let blue = egui::Color32::from_rgb(56, 120, 70);
                 if ui.add_sized([90.0, 30.0], egui::Button::new("📻 LISTEN").fill(if self.is_listening { blue } else { egui::Color32::from_rgb(45, 45, 45) })).clicked() {
                     if self.is_listening {
-                        // 🟢 Stop listening - toggle OFF
                         log::info!("[UI] LISTEN button clicked - STOPPING");
                         self.is_listening = false;
                         self.is_calling_cq = false;
                         let _ = self.engine.cmds.send(UiCmd::Stop);
                     } else {
-                        // 🟢 Start listening - toggle ON
                         log::info!("[UI] LISTEN button clicked - STARTING");
                         log::info!("   my_call: {}", self.my_call);
                         self.is_listening = true;
                         self.is_calling_cq = false;
                         self.their_call = String::new();
-                        
                         let _ = self.engine.cmds.send(UiCmd::Listen { 
                             my_call: self.my_call.clone(), 
                             their_call: String::new(), 
@@ -469,7 +571,6 @@ impl eframe::App for Msk2kEguiApp {
                     }
                 }
                 
-                // 🟢 FIXED: "CALL CQ" now respects the Grid Mode toggle
                 if ui.add_sized([90.0, 30.0], egui::Button::new("📢 CALL CQ").fill(if self.is_calling_cq { blue } else { egui::Color32::from_rgb(45, 45, 45) })).clicked() {
                     if self.is_calling_cq { 
                         self.is_calling_cq = false; 
@@ -479,7 +580,6 @@ impl eframe::App for Msk2kEguiApp {
                         self.is_calling_cq = true; 
                         self.their_call = String::new(); 
                         
-                        // Check if user enabled Grid Mode in settings
                         if self.config.station.use_grid_in_cq {
                             let _ = self.engine.cmds.send(UiCmd::StartCqWithGrid { 
                                 my_call: self.my_call.clone(), 
@@ -499,7 +599,6 @@ impl eframe::App for Msk2kEguiApp {
                 ui.label("TARGET:");
                 
                 ui.horizontal(|ui| {
-                    // 🟢 TARGET callsign always limited to 10 characters
                     if ui.text_edit_singleline(&mut self.their_call).changed() {
                         self.their_call = self.their_call.to_uppercase();
                         if self.their_call.len() > 10 {
@@ -507,7 +606,6 @@ impl eframe::App for Msk2kEguiApp {
                         }
                     }
                     
-                    // 🟢 Show character count
                     if !self.their_call.is_empty() {
                         let count_color = if self.their_call.len() == 10 { 
                             egui::Color32::from_rgb(255, 180, 0) 
@@ -538,7 +636,7 @@ impl eframe::App for Msk2kEguiApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut clicked_call: Option<String> = None;
-            let mut clicked_grid: Option<String> = None; // 🟢 NEW: Store grid if CQ has one
+            let mut clicked_grid: Option<String> = None; 
             ui.columns(3, |cols| {
                 for i in 0..3 {
                     cols[i].vertical(|ui| {
@@ -563,13 +661,9 @@ impl eframe::App for Msk2kEguiApp {
                             ui.set_min_width(ui.available_width());
                             let log = match i { 0 => &self.rx_log, 1 => &self.tx_log, _ => &self.cq_log };
                             for entry in log.iter().rev() {
-                                // 🟢 TX column (i==1) - compact background, right-aligned text
                                 if i == 1 {
-                                    // Allocate space for the row
                                     ui.allocate_ui(egui::vec2(ui.available_width(), 18.0), |ui| {
-                                        // Right-align the content
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            // Show text with compact background (only around text, not full width)
                                             if entry.colored {
                                                 egui::Frame::none()
                                                     .fill(egui::Color32::from_rgba_unmultiplied(31, 111, 235, 6))
@@ -577,7 +671,6 @@ impl eframe::App for Msk2kEguiApp {
                                                     .show(ui, |ui| {
                                                         ui.monospace(&entry.text);
                                                     });
-                                                // Draw right-side bar indicator
                                                 let rect = ui.max_rect();
                                                 let bar_rect = egui::Rect::from_min_max(
                                                     egui::pos2(rect.max.x - 3.0, rect.min.y),
@@ -590,7 +683,6 @@ impl eframe::App for Msk2kEguiApp {
                                         });
                                     });
                                 } else {
-                                    // RX and SPOTS columns - clickable with full-width allocation
                                     ui.allocate_ui(egui::vec2(ui.available_width(), 18.0), |ui| {
                                         let rect = ui.available_rect_before_wrap();
                                         let color = if entry.colored { 
@@ -610,7 +702,6 @@ impl eframe::App for Msk2kEguiApp {
                                             
                                             ui.horizontal(|ui| {
                                                 if ui.selectable_label(false, &entry.text).clicked() { 
-                                                    // 🟢 Extract both call and grid
                                                     if let Some((call, grid)) = extract_callsign_and_grid(&entry.text) { 
                                                         clicked_call = Some(call);
                                                         clicked_grid = grid;
@@ -638,7 +729,7 @@ impl eframe::App for Msk2kEguiApp {
                     their_call: target, 
                     rpt: self.calc_report(), 
                     rx_slot: self.last_rx_slot,
-                    grid: clicked_grid, // 🟢 NEW: Pass grid if found
+                    grid: clicked_grid, 
                 }); 
             }
         });
@@ -657,7 +748,6 @@ impl eframe::App for Msk2kEguiApp {
                     .num_columns(8)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
-                        // Fixed widths for each column
                         ui.add_sized([80.0, 20.0], egui::Label::new(egui::RichText::new("DATE").strong().color(egui::Color32::GRAY)));
                         ui.add_sized([65.0, 20.0], egui::Label::new(egui::RichText::new("START (Z)").strong().color(egui::Color32::GRAY)));
                         ui.add_sized([65.0, 20.0], egui::Label::new(egui::RichText::new("END (Z)").strong().color(egui::Color32::GRAY)));
@@ -707,12 +797,9 @@ impl eframe::App for Msk2kEguiApp {
     }
 }
 
-// src/gui/app.rs
-
 fn extract_callsign_and_grid(text: &str) -> Option<(String, Option<String>)> {
     let t = text.to_uppercase();
     
-    // Remove count suffix like "(181)" first
     let clean_text = if let Some(pos) = t.find('(') {
         t[..pos].trim()
     } else {
@@ -721,7 +808,6 @@ fn extract_callsign_and_grid(text: &str) -> Option<(String, Option<String>)> {
     
     let parts: Vec<&str> = clean_text.split_whitespace().collect();
     
-    // 1. "CQ DE CALL" or "CQ DE CALL GRID" format - skip the "DE" token
     if parts.len() >= 3 && parts[0] == "CQ" && parts[1] == "DE" {
         let call = parts[2];
         if parts.len() >= 4 {
@@ -736,7 +822,6 @@ fn extract_callsign_and_grid(text: &str) -> Option<(String, Option<String>)> {
         return Some((call.to_string(), None));
     }
     
-    // 2. "CQ CALL GRID" format (no DE - e.g. grid CQ: "CQ GW4WND IO82")
     if parts.len() >= 3 && parts[0] == "CQ" {
         let call = parts[1];
         let potential_grid = parts[2];
@@ -751,18 +836,15 @@ fn extract_callsign_and_grid(text: &str) -> Option<(String, Option<String>)> {
         }
     }
     
-    // 3. "CQ CALL" format (2 tokens only, no grid)
     if parts.len() == 2 && parts[0] == "CQ" {
         return Some((parts[1].to_string(), None));
     }
     
-    // 4. "A de B" format (directed messages, no grid)
     if clean_text.contains(" DE ") { 
         let call = clean_text.split(" DE ").nth(1)?.split_whitespace().next().map(|s| s.to_string())?;
         return Some((call, None));
     }
     
-    // 5. "CALL GRID" format without CQ (e.g. from accumulated decode)
     if parts.len() >= 2 {
         let potential_call = parts[0];
         let potential_grid = parts[1];
@@ -778,7 +860,6 @@ fn extract_callsign_and_grid(text: &str) -> Option<(String, Option<String>)> {
     None
 }
 
-// 🟢 Keep legacy function for compatibility - just wraps new function
 fn extract_callsign(text: &str) -> Option<String> {
     extract_callsign_and_grid(text).map(|(call, _)| call)
 }
