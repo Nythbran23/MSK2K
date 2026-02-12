@@ -85,26 +85,46 @@ impl Msk2kEguiApp {
         let qso_log = adif_logger.read_all().unwrap_or_default();
         let config_path = crate::settings::default_config_path();
         let config = crate::settings::Config::load(&config_path).unwrap_or_default();
+        let rig_cmd = get_bundled_rigctl_path();
+        
+        // We use "rigctld -l" because we bundled rigctld, not rigctl.
+        // Luckily, rigctld -l produces the exact same list!
+        // We also hide the console window on Windows to keep it clean.
+        #[cfg(target_os = "windows")]
+        // 🟢 CROSS-PLATFORM LIST LOADING
+        let rig_cmd = get_bundled_rigctl_path();
         let mut rig_list = Vec::new();
-        // Try running "rigctl -l"
-        if let Ok(output) = Command::new("rigctl").arg("-l").output() {
-            if let Ok(text) = String::from_utf8(output.stdout) {
+
+        #[cfg(target_os = "windows")]
+        let output = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            Command::new(&rig_cmd)
+                .arg("-l")
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let output = Command::new(&rig_cmd).arg("-l").output();
+
+        if let Ok(out) = output {
+            if let Ok(text) = String::from_utf8(out.stdout) {
                 for line in text.lines() {
-                    // Skip header or short lines
-                    if line.starts_with(" Rig") || line.len() < 10 { continue; }
+                    // Skip headers or garbage lines
+                    if line.trim().is_empty() || line.starts_with(" Rig") || line.len() < 10 { continue; }
                     
-                    // Parse: "3081  Icom  IC-9700 ..."
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 {
                         let id = parts[0].to_string();
-                        // Combine Mfg + Model for display (e.g. "Icom IC-9700")
+                        // Combine Manufacturer + Model
+                        // e.g. "Icom" + "IC-9700" = "Icom IC-9700"
                         let name = format!("{} {}", parts[1], parts[2]); 
                         rig_list.push((id, name));
                     }
                 }
             }
         }
-
         Self {
             engine,
             my_call: "NOCALL".to_string(),
@@ -285,7 +305,7 @@ impl eframe::App for Msk2kEguiApp {
 
         if self.settings_open {
             let mut close = false;
-            // 🟢 WIDER SETTINGS WINDOW
+
             egui::Window::new("⚙ Settings").collapsible(false).resizable(true).default_width(450.0).show(ctx, |ui| {
                 ui.heading("Station Setup");
                 ui.horizontal(|ui| { 
@@ -495,6 +515,7 @@ impl eframe::App for Msk2kEguiApp {
 
         // ... (Rest of GUI: Top Bar, Actions, Logbook) ...
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+            ui.add_space(5.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&self.my_call).strong().size(22.0).color(egui::Color32::GRAY));
                 ui.add_space(20.0); ui.label("BAND:");
@@ -872,4 +893,32 @@ fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
     let mut outs = host.output_devices().map(|d| d.map(|x| x.name().unwrap_or_default()).collect()).unwrap_or(vec![]);
     ins.sort(); ins.dedup(); outs.sort(); outs.dedup();
     (ins, outs)
+}
+
+// 🟢 PASTE AT BOTTOM OF src/gui/app.rs
+
+fn get_bundled_rigctl_path() -> String {
+    // 1. Determine binary name based on OS
+    let binary_name = if cfg!(target_os = "windows") { "rigctld.exe" } else { "rigctld" };
+    
+    // 2. Find the current executable path
+    if let Ok(mut path) = std::env::current_exe() {
+        path.pop(); // Remove "msk2k" filename
+        
+        // 3. Check "tools" folder (Release / Bundled)
+        let tools_path = path.join("tools").join(binary_name);
+        if tools_path.exists() {
+            return tools_path.to_string_lossy().to_string();
+        }
+
+        // 4. Check same folder (Development / Flat structure)
+        let local_path = path.join(binary_name);
+        if local_path.exists() {
+            return local_path.to_string_lossy().to_string();
+        }
+    }
+    
+    // 5. Fallback: Assume installed globally (Homebrew/Linux package)
+    // On Mac/Linux, this is often where it lives if not bundled correctly.
+    "rigctld".to_string()
 }
