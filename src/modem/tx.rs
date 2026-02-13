@@ -230,12 +230,24 @@ fn generate_transmission_from_bits(
 fn build_output_and_sender(cfg: &TxAudioCfg) -> Result<(AudioOutput, mpsc::UnboundedSender<Vec<f32>>)> {
     let manager = DeviceManager::new()?;
     let device = if let Some(ref name) = cfg.output_device {
+        log::info!("[TX] Opening output device: '{}'", name);
         find_nth_output_device(name).unwrap_or_else(|| {
-            manager.get_output_device(Some(name)).or_else(|_| manager.default_output_device()).unwrap()
+            // Fallback: try base name (without suffix) then full display name
+            let (base, _) = parse_device_suffix(name);
+            log::warn!("[TX] find_nth_output_device failed, trying DeviceManager with base='{}' then full='{}'", base, name);
+            manager.get_output_device(Some(&base))
+                .or_else(|_| manager.get_output_device(Some(name)))
+                .or_else(|_| {
+                    log::warn!("[TX] All device lookups failed, using system default output");
+                    manager.default_output_device()
+                })
+                .unwrap()
         })
     } else {
+        log::info!("[TX] No output device configured, using system default");
         manager.default_output_device()?
     };
+    log::info!("[TX] Output device opened successfully");
     let audio_cfg = AudioConfig::new(cfg.sample_rate, 1, cfg.buffer_size);
     let mut out = AudioOutputBuilder::new().device(device).config(audio_cfg).build().map_err(|e| anyhow!("AudioOutput error: {e:?}"))?;
     let (audio_tx, audio_rx) = mpsc::unbounded_channel::<Vec<f32>>();
@@ -335,78 +347,83 @@ fn message_from_short_format2(s: &str, my_call: &str, their_call: &str) -> Resul
     }
 }
 
-/// Resolve a display name like "USB Audio CODEC (TX)" to the correct cpal device.
+/// Resolve a display name like "USB Audio CODEC (TX)" to the correct cpal output device.
 fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let (base_name, suffix) = parse_device_suffix(display_name);
     let host = cpal::default_host();
     
-    // Collect all devices - try host.devices() first (sees all on macOS),
-    // fall back to combined input+output if empty (Windows WASAPI)
-    let all_devices: Vec<cpal::Device> = {
-        let from_all = host.devices().map(|d| d.collect::<Vec<_>>()).unwrap_or_default();
-        if !from_all.is_empty() {
-            from_all
-        } else {
-            let mut devs: Vec<cpal::Device> = Vec::new();
-            if let Ok(d) = host.output_devices() { devs.extend(d); }
-            if let Ok(d) = host.input_devices() { devs.extend(d); }
-            devs
-        }
-    };
+    log::info!("[TX] Resolving output device: '{}' (base='{}', suffix='{}')", display_name, base_name, suffix);
     
-    match suffix.as_str() {
-        "TX" | "RX/TX" => {
-            let mut fallback: Option<cpal::Device> = None;
-            for dev in all_devices {
-                if let Ok(name) = dev.name() {
-                    if name == base_name {
-                        let has_out = dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
-                            || dev.default_output_config().is_ok();
-                        if has_out { return Some(dev); }
-                        let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
-                            || dev.default_input_config().is_ok();
-                        if !has_in && fallback.is_none() { fallback = Some(dev); }
-                    }
-                }
-            }
-            if let Some(fb) = fallback { return Some(fb); }
-        }
-        "RX" => {
-            for dev in all_devices {
-                if let Ok(name) = dev.name() {
-                    if name == base_name {
-                        let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
-                            || dev.default_input_config().is_ok();
-                        if has_in { return Some(dev); }
-                    }
-                }
-            }
-        }
-        _ => {
-            // No suffix or numeric — find by exact name (first match) or Nth occurrence
-            let occurrence: usize = suffix.parse().unwrap_or(1);
-            let mut count = 0usize;
-            for dev in all_devices {
-                if let Ok(name) = dev.name() {
-                    if name == base_name {
-                        count += 1;
-                        if count == occurrence { return Some(dev); }
-                    }
-                }
-            }
-        }
-    }
-    // Last resort: try exact display_name match against output devices
+    // Strategy 1: Try output_devices() first — most reliable on all platforms for TX
     if let Ok(devs) = host.output_devices() {
         for dev in devs {
             if let Ok(name) = dev.name() {
-                if name == display_name || name == base_name {
+                if name == base_name || name == display_name {
+                    log::info!("[TX] Found output device via output_devices(): '{}'", name);
                     return Some(dev);
                 }
             }
         }
     }
+    
+    log::info!("[TX] Not found in output_devices(), trying host.devices()...");
+    
+    // Strategy 2: Try host.devices() with capability detection (macOS path)
+    if let Ok(devs) = host.devices() {
+        let dev_list: Vec<cpal::Device> = devs.collect();
+        if !dev_list.is_empty() {
+            match suffix.as_str() {
+                "TX" | "RX/TX" => {
+                    let mut fallback: Option<cpal::Device> = None;
+                    for dev in dev_list {
+                        if let Ok(name) = dev.name() {
+                            if name == base_name {
+                                let has_out = dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                                    || dev.default_output_config().is_ok();
+                                if has_out { 
+                                    log::info!("[TX] Found TX device via capability detection: '{}'", name);
+                                    return Some(dev); 
+                                }
+                                let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                                    || dev.default_input_config().is_ok();
+                                if !has_in && fallback.is_none() { fallback = Some(dev); }
+                            }
+                        }
+                    }
+                    if let Some(fb) = fallback { 
+                        log::info!("[TX] Using inferred TX device (not-input fallback)");
+                        return Some(fb); 
+                    }
+                }
+                "RX" => {
+                    for dev in dev_list {
+                        if let Ok(name) = dev.name() {
+                            if name == base_name {
+                                let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                                    || dev.default_input_config().is_ok();
+                                if has_in { return Some(dev); }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let occurrence: usize = suffix.parse().unwrap_or(1);
+                    let mut count = 0usize;
+                    for dev in dev_list {
+                        if let Ok(name) = dev.name() {
+                            if name == base_name {
+                                count += 1;
+                                if count == occurrence { return Some(dev); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    log::warn!("[TX] Could not resolve output device '{}'", display_name);
     None
 }
 
