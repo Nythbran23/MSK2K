@@ -58,58 +58,62 @@ jobs:
     - name: Build Release
       run: cargo build --release --target ${{ matrix.target }} --verbose
 
-    # --- 4. DEBUG CERTIFICATE (temporary - replace with real import once working) ---
-    - name: Debug Certificate Import
+    # --- 4. APPLE CODE SIGNING & NOTARIZATION (macOS only) ---
+
+    - name: Install Apple Certificate
       if: runner.os == 'macOS'
       env:
         CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
         CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       run: |
         CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
-
-        # Decode and check file size
-        echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
-        echo "=== File size ==="
-        ls -la $CERTIFICATE_PATH
-
-        # Check it's a valid p12
-        echo "=== File type ==="
-        file $CERTIFICATE_PATH
-
-        # Check password length (without revealing it)
-        echo "=== Password length: ${#CERTIFICATE_PASSWORD} ==="
-
-        # Try openssl to verify the p12 independently (try both with and without -legacy)
-        echo "=== OpenSSL with -legacy flag ==="
-        openssl pkcs12 -in $CERTIFICATE_PATH -nokeys -passin env:CERTIFICATE_PASSWORD -legacy 2>&1 || true
-
-        echo "=== OpenSSL without -legacy flag ==="
-        openssl pkcs12 -in $CERTIFICATE_PATH -nokeys -passin env:CERTIFICATE_PASSWORD 2>&1 || true
-
-        echo "=== OpenSSL info ==="
-        openssl version
-
-        # Now try the actual import
-        echo "=== Attempting security import ==="
         KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
         KEYCHAIN_PASSWORD=$(openssl rand -hex 12)
 
+        echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+
+        # Create and configure temporary keychain
         security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
         security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
         security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
 
-        # Try import with verbose output
+        # Import certificate (without -t and -f flags for compatibility)
         security import $CERTIFICATE_PATH -P "$CERTIFICATE_PASSWORD" \
-          -A -t cert -f pkcs12 -k $KEYCHAIN_PATH 2>&1 || echo "IMPORT FAILED"
+          -A -k $KEYCHAIN_PATH
+        security set-key-partition-list -S apple-tool:,apple: \
+          -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+        security list-keychains -d user -s $KEYCHAIN_PATH
 
-        # Try alternate import without -t and -f flags
-        echo "=== Trying alternate import ==="
-        security import $CERTIFICATE_PATH -P "$CERTIFICATE_PASSWORD" \
-          -A -k $KEYCHAIN_PATH 2>&1 || echo "ALTERNATE IMPORT ALSO FAILED"
+        # Verify signing identity is available
+        security find-identity -v -p codesigning $KEYCHAIN_PATH
 
-        # List what's in the keychain anyway
-        echo "=== Keychain contents ==="
-        security find-identity -v -p codesigning $KEYCHAIN_PATH 2>&1 || true
+    - name: Code Sign macOS Binary
+      if: runner.os == 'macOS'
+      run: |
+        # Find the Developer ID identity automatically
+        IDENTITY=$(security find-identity -v -p codesigning $RUNNER_TEMP/app-signing.keychain-db | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        echo "Signing with identity: $IDENTITY"
+
+        # Sign the main binary with hardened runtime
+        codesign --force --options runtime \
+          --sign "$IDENTITY" \
+          --timestamp \
+          target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+
+        # Verify the signature
+        codesign --verify --verbose target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+
+    - name: Code Sign rigctld
+      if: runner.os == 'macOS'
+      run: |
+        IDENTITY=$(security find-identity -v -p codesigning $RUNNER_TEMP/app-signing.keychain-db | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+        # Sign rigctld too, otherwise macOS may block it
+        RIGCTLD_PATH=$(brew --prefix)/bin/rigctld
+        codesign --force --options runtime \
+          --sign "$IDENTITY" \
+          --timestamp \
+          "$RIGCTLD_PATH"
 
     # --- 5. PREPARE PACKAGE ---
 
@@ -123,7 +127,7 @@ jobs:
         cd release_pkg
         zip -r ../${{ matrix.artifact_name }} .
 
-    # MACOS PACKAGE (signing disabled until certificate issue resolved)
+    # MACOS PACKAGE
     - name: Bundle macOS
       if: runner.os == 'macOS'
       run: |
@@ -147,14 +151,37 @@ jobs:
         Copy-Item "hamlib_temp/hamlib-w64-4.5.5/bin/*.dll" -Destination "release_pkg/"
         Compress-Archive -Path "release_pkg/*" -DestinationPath "${{ matrix.artifact_name }}"
 
-    # --- 6. Upload Artifacts ---
+    # --- 6. NOTARIZE macOS package ---
+    - name: Notarize macOS Package
+      if: runner.os == 'macOS'
+      env:
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      run: |
+        # Submit the zip for notarization
+        xcrun notarytool submit ${{ matrix.artifact_name }} \
+          --apple-id "$APPLE_ID" \
+          --password "$APPLE_ID_PASSWORD" \
+          --team-id "$APPLE_TEAM_ID" \
+          --wait --timeout 10m
+
+        echo "Notarization complete!"
+
+    # --- 7. Clean up keychain ---
+    - name: Clean up Apple keychain
+      if: runner.os == 'macOS' && always()
+      run: |
+        security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+
+    # --- 8. Upload Artifacts ---
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact_name }}
         path: ${{ matrix.artifact_name }}
 
-  # --- 7. CREATE RELEASE (Only on Tag push) ---
+  # --- 9. CREATE RELEASE (Only on Tag push) ---
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
