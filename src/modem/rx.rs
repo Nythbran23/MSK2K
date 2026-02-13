@@ -332,10 +332,23 @@ fn find_nth_device(display_name: &str, _is_input: bool) -> Option<cpal::Device> 
     let (base_name, suffix) = parse_device_suffix(display_name);
     let host = cpal::default_host();
     
+    // Collect all devices - try host.devices() first (sees all on macOS),
+    // fall back to combined input+output if empty (Windows WASAPI)
+    let all_devices: Vec<cpal::Device> = {
+        let from_all = host.devices().map(|d| d.collect::<Vec<_>>()).unwrap_or_default();
+        if !from_all.is_empty() {
+            from_all
+        } else {
+            let mut devs: Vec<cpal::Device> = Vec::new();
+            if let Ok(d) = host.input_devices() { devs.extend(d); }
+            if let Ok(d) = host.output_devices() { devs.extend(d); }
+            devs
+        }
+    };
+    
     match suffix.as_str() {
         "RX" => {
-            // Find the device with this name that has input capability
-            for dev in host.devices().ok()? {
+            for dev in all_devices {
                 if let Ok(name) = dev.name() {
                     if name == base_name {
                         let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
@@ -346,10 +359,8 @@ fn find_nth_device(display_name: &str, _is_input: bool) -> Option<cpal::Device> 
             }
         }
         "TX" => {
-            // Find the device that has output capability, or if undetectable,
-            // the one that does NOT have input capability (inferred TX)
             let mut fallback: Option<cpal::Device> = None;
-            for dev in host.devices().ok()? {
+            for dev in all_devices {
                 if let Ok(name) = dev.name() {
                     if name == base_name {
                         let has_out = dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
@@ -364,15 +375,24 @@ fn find_nth_device(display_name: &str, _is_input: bool) -> Option<cpal::Device> 
             if let Some(fb) = fallback { return Some(fb); }
         }
         _ => {
-            // Numeric index or no suffix — find Nth occurrence
             let occurrence: usize = suffix.parse().unwrap_or(1);
             let mut count = 0usize;
-            for dev in host.devices().ok()? {
+            for dev in all_devices {
                 if let Ok(name) = dev.name() {
                     if name == base_name {
                         count += 1;
                         if count == occurrence { return Some(dev); }
                     }
+                }
+            }
+        }
+    }
+    // Last resort: try exact display_name match against input devices
+    if let Ok(devs) = host.input_devices() {
+        for dev in devs {
+            if let Ok(name) = dev.name() {
+                if name == display_name || name == base_name {
+                    return Some(dev);
                 }
             }
         }

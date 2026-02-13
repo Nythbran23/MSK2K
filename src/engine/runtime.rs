@@ -417,13 +417,18 @@ async fn run_runtime(
                         if enable_launcher && !serial_port.is_empty() {
                             log::info!("[LAUNCHER] Starting rigctld: Model={} Port={}", rig_model, serial_port);
                             
-                            // Spawning the process
                             let rig_cmd = get_rigctld_path();
-                            let child = Command::new(rig_cmd)
-                                .args(&["-m", &rig_model, "-r", &serial_port, "-s", &baud_rate.to_string()])
-                                .spawn();
-
-                            match child {
+                            let mut cmd = Command::new(rig_cmd);
+                            cmd.args(&["-m", &rig_model, "-r", &serial_port, "-s", &baud_rate.to_string()]);
+                            
+                            // Hide console window on Windows
+                            #[cfg(target_os = "windows")]
+                            {
+                                use std::os::windows::process::CommandExt;
+                                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                            }
+                            
+                            match cmd.spawn() {
                                 Ok(c) => rigctld_process = Some(c),
                                 Err(e) => log::error!("[LAUNCHER] Failed to start: {}", e),
                             }

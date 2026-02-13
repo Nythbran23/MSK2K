@@ -335,18 +335,30 @@ fn message_from_short_format2(s: &str, my_call: &str, their_call: &str) -> Resul
     }
 }
 
-/// Resolve a display name like "USB Audio CODEC (2)" to the 2nd cpal output device
+/// Resolve a display name like "USB Audio CODEC (TX)" to the correct cpal device.
 fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let (base_name, suffix) = parse_device_suffix(display_name);
     let host = cpal::default_host();
     
+    // Collect all devices - try host.devices() first (sees all on macOS),
+    // fall back to combined input+output if empty (Windows WASAPI)
+    let all_devices: Vec<cpal::Device> = {
+        let from_all = host.devices().map(|d| d.collect::<Vec<_>>()).unwrap_or_default();
+        if !from_all.is_empty() {
+            from_all
+        } else {
+            let mut devs: Vec<cpal::Device> = Vec::new();
+            if let Ok(d) = host.output_devices() { devs.extend(d); }
+            if let Ok(d) = host.input_devices() { devs.extend(d); }
+            devs
+        }
+    };
+    
     match suffix.as_str() {
         "TX" | "RX/TX" => {
-            // Find device with output capability, or if undetectable,
-            // the one that does NOT have input capability (inferred TX)
             let mut fallback: Option<cpal::Device> = None;
-            for dev in host.devices().ok()? {
+            for dev in all_devices {
                 if let Ok(name) = dev.name() {
                     if name == base_name {
                         let has_out = dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
@@ -361,7 +373,7 @@ fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
             if let Some(fb) = fallback { return Some(fb); }
         }
         "RX" => {
-            for dev in host.devices().ok()? {
+            for dev in all_devices {
                 if let Ok(name) = dev.name() {
                     if name == base_name {
                         let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
@@ -372,14 +384,25 @@ fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
             }
         }
         _ => {
+            // No suffix or numeric — find by exact name (first match) or Nth occurrence
             let occurrence: usize = suffix.parse().unwrap_or(1);
             let mut count = 0usize;
-            for dev in host.devices().ok()? {
+            for dev in all_devices {
                 if let Ok(name) = dev.name() {
                     if name == base_name {
                         count += 1;
                         if count == occurrence { return Some(dev); }
                     }
+                }
+            }
+        }
+    }
+    // Last resort: try exact display_name match against output devices
+    if let Ok(devs) = host.output_devices() {
+        for dev in devs {
+            if let Ok(name) = dev.name() {
+                if name == display_name || name == base_name {
+                    return Some(dev);
                 }
             }
         }

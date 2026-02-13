@@ -913,17 +913,30 @@ fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
     
     // Collect ALL devices with their capabilities
-    let mut all_devices: Vec<(String, bool, bool)> = Vec::new(); // (name, has_input, has_output)
+    // Use host.devices() as primary (sees all devices on macOS including hidden USB codecs)
+    // Fall back to combined input+output lists if host.devices() unavailable (Windows WASAPI)
+    let mut all_devices: Vec<(String, bool, bool)> = Vec::new();
     
-    if let Ok(devs) = host.devices() {
-        for d in devs {
-            if let Ok(name) = d.name() {
-                let has_in = d.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
-                    || d.default_input_config().is_ok();
-                let has_out = d.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
-                    || d.default_output_config().is_ok();
-                all_devices.push((name, has_in, has_out));
-            }
+    let device_list: Vec<cpal::Device> = {
+        let from_all = host.devices().map(|d| d.collect::<Vec<_>>()).unwrap_or_default();
+        if !from_all.is_empty() {
+            from_all
+        } else {
+            // Fallback for backends that don't support host.devices()
+            let mut devs: Vec<cpal::Device> = Vec::new();
+            if let Ok(d) = host.input_devices() { devs.extend(d); }
+            if let Ok(d) = host.output_devices() { devs.extend(d); }
+            devs
+        }
+    };
+    
+    for d in device_list {
+        if let Ok(name) = d.name() {
+            let has_in = d.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                || d.default_input_config().is_ok();
+            let has_out = d.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                || d.default_output_config().is_ok();
+            all_devices.push((name, has_in, has_out));
         }
     }
     
