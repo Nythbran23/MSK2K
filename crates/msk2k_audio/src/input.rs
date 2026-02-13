@@ -65,31 +65,52 @@ impl AudioInput {
     /// The channel will receive Vec<f32> buffers at the configured sample rate.
     /// Stereo audio will be downmixed to mono if channels > 1.
     pub fn start(&mut self, tx: mpsc::UnboundedSender<Vec<AudioSample>>) -> Result<(), InputError> {
-        // Query the device's default config to get supported channels
-        let default_cfg = self.device.default_input_config();
-        let (use_channels, use_buffer_size) = match &default_cfg {
-            Ok(cfg) => {
-                let ch = cfg.channels();
-                log::info!("[AUDIO IN] Device default config: {}Hz, {} ch, {:?}", 
-                    cfg.sample_rate().0, ch, cfg.sample_format());
-                (ch, cpal::BufferSize::Default)
-            }
-            Err(e) => {
-                log::warn!("[AUDIO IN] Could not query default config: {}, using requested config", e);
-                (self.config.channels, cpal::BufferSize::Fixed(self.config.buffer_size as u32))
-            }
-        };
-
-        let stream_config = StreamConfig {
-            channels: use_channels,
+        let requested_config = StreamConfig {
+            channels: self.config.channels,
             sample_rate: cpal::SampleRate(self.config.sample_rate),
-            buffer_size: use_buffer_size,
+            buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
         };
 
-        log::info!("[AUDIO IN] Opening stream: {}Hz, {} ch, buffer={:?}", 
-            self.config.sample_rate, use_channels, use_buffer_size);
+        // Try requested config first (works on macOS), fall back to device default (needed for Windows WASAPI)
+        let (stream_config, channels) = {
+            // Test if the requested config works by checking supported configs
+            let test_stream = self.device.build_input_stream(
+                &requested_config,
+                |_: &[f32], _: &cpal::InputCallbackInfo| {},
+                |_| {},
+                None,
+            );
+            
+            if test_stream.is_ok() {
+                drop(test_stream);
+                log::info!("[AUDIO IN] Using requested config: {}Hz, {} ch, {} buf",
+                    self.config.sample_rate, self.config.channels, self.config.buffer_size);
+                (requested_config, self.config.channels as usize)
+            } else {
+                // Requested config not supported — query device default for channels
+                log::info!("[AUDIO IN] Requested config not supported, querying device default...");
+                let default_cfg = self.device.default_input_config();
+                match default_cfg {
+                    Ok(cfg) => {
+                        let ch = cfg.channels();
+                        log::info!("[AUDIO IN] Device default: {}Hz, {} ch — using {} ch with our sample rate",
+                            cfg.sample_rate().0, ch, ch);
+                        let fallback = StreamConfig {
+                            channels: ch,
+                            sample_rate: cpal::SampleRate(self.config.sample_rate),
+                            buffer_size: cpal::BufferSize::Default,
+                        };
+                        (fallback, ch as usize)
+                    }
+                    Err(e) => {
+                        log::warn!("[AUDIO IN] Cannot query default config: {}. Trying requested config anyway.", e);
+                        (requested_config, self.config.channels as usize)
+                    }
+                }
+            }
+        };
 
-        let channels = use_channels as usize;
+        let channels = channels;
         let tx = Arc::new(tx);
 
         // Build the input stream

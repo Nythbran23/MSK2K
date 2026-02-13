@@ -85,6 +85,9 @@ struct AppConfig {
     my_call: String,
     input_device: Option<String>,
     output_device: Option<String>,
+    rig_model: String,
+    rig_port: String,
+    rig_baud: String,
 }
 
 fn load_config() -> AppConfig {
@@ -106,15 +109,21 @@ fn load_config() -> AppConfig {
                             cfg.output_device = Some(val.to_string());
                         }
                     }
+                    "rig_model" => cfg.rig_model = v.trim().to_string(),
+                    "rig_port" => cfg.rig_port = v.trim().to_string(),
+                    "rig_baud" => cfg.rig_baud = v.trim().to_string(),
                     _ => {}
                 }
             }
         }
         log::info!(
-            "📂 Loaded config: Call={}, In={:?}, Out={:?}",
+            "📂 Loaded config: Call={}, In={:?}, Out={:?}, Rig={} Port={} Baud={}",
             cfg.my_call,
             cfg.input_device,
-            cfg.output_device
+            cfg.output_device,
+            cfg.rig_model,
+            cfg.rig_port,
+            cfg.rig_baud
         );
     }
     cfg
@@ -122,10 +131,13 @@ fn load_config() -> AppConfig {
 
 fn save_config(cfg: &AppConfig) {
     let data = format!(
-        "my_call={}\ninput={}\noutput={}\n",
+        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\n",
         cfg.my_call,
         cfg.input_device.as_deref().unwrap_or(""),
-        cfg.output_device.as_deref().unwrap_or("")
+        cfg.output_device.as_deref().unwrap_or(""),
+        cfg.rig_model,
+        cfg.rig_port,
+        cfg.rig_baud
     );
     if let Err(e) = fs::write("msk2k.cfg", data) {
         log::warn!("Failed to save config: {}", e);
@@ -173,10 +185,16 @@ async fn run_runtime(
         my_call: saved_cfg.my_call.clone(),
         input_device: saved_cfg.input_device.clone(),
         output_device: saved_cfg.output_device.clone(),
+        rig_model: saved_cfg.rig_model.clone(),
+        rig_port: saved_cfg.rig_port.clone(),
+        rig_baud: saved_cfg.rig_baud.clone(),
     });
 
     let mut input_device: Option<String> = saved_cfg.input_device.clone();
     let mut output_device: Option<String> = saved_cfg.output_device.clone();
+    let mut current_rig_model: String = saved_cfg.rig_model.clone();
+    let mut current_rig_port: String = saved_cfg.rig_port.clone();
+    let mut current_rig_baud: String = saved_cfg.rig_baud.clone();
     let sample_rate: u32 = 48_000;
     let buffer_size: usize = 1024;
     let mut output_level: f32 = 0.4;
@@ -409,13 +427,22 @@ async fn run_runtime(
 
                     // 2. Configure Launcher
                     UiCmd::ConfigureLauncher { enable_launcher, rig_model, serial_port, baud_rate } => {
+                        // Track rig settings for config save
+                        current_rig_model = rig_model.clone();
+                        current_rig_port = serial_port.clone();
+                        current_rig_baud = baud_rate.to_string();
+
                         // Always kill old process first
                         if let Some(mut child) = rigctld_process.take() {
+                            log::info!("[LAUNCHER] Killing old rigctld (pid={})", child.id());
                             let _ = child.kill();
+                            let _ = child.wait(); // Wait for port to be released
+                            // Small delay to ensure port 4532 is freed
+                            std::thread::sleep(std::time::Duration::from_millis(300));
                         }
 
                         if enable_launcher && !serial_port.is_empty() {
-                            log::info!("[LAUNCHER] Starting rigctld: Model={} Port={}", rig_model, serial_port);
+                            log::info!("[LAUNCHER] Starting rigctld: Model={} Port={} Baud={}", rig_model, serial_port, baud_rate);
                             
                             let rig_cmd = get_rigctld_path();
                             let mut cmd = Command::new(rig_cmd);
@@ -449,6 +476,9 @@ async fn run_runtime(
                             my_call: qso_engine.my_call.clone(),
                             input_device: input_device.clone(),
                             output_device: output_device.clone(),
+                            rig_model: current_rig_model.clone(),
+                            rig_port: current_rig_port.clone(),
+                            rig_baud: current_rig_baud.clone(),
                         });
                         log::info!("[ENGINE] Audio settings applied & saved");
                     }
@@ -460,6 +490,9 @@ async fn run_runtime(
                                 my_call: qso_engine.my_call.clone(),
                                 input_device: input_device.clone(),
                                 output_device: output_device.clone(),
+                                rig_model: current_rig_model.clone(),
+                                rig_port: current_rig_port.clone(),
+                                rig_baud: current_rig_baud.clone(),
                             });
                         }
                         
@@ -734,6 +767,14 @@ async fn run_runtime(
             else => break,
         }
     }
+    
+    // Cleanup: kill rigctld on exit
+    if let Some(mut child) = rigctld_process.take() {
+        log::info!("[LAUNCHER] Shutting down rigctld (pid={})", child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    
     Ok(())
 }
 

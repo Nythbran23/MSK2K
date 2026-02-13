@@ -120,6 +120,9 @@ pub enum UiEvent {
         my_call: String,
         input_device: Option<String>,
         output_device: Option<String>,
+        rig_model: String,
+        rig_port: String,
+        rig_baud: String,
     },
     RigFreqChanged {
         freq_hz: u64,

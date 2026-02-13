@@ -196,7 +196,7 @@ impl Msk2kEguiApp {
     fn drain_events(&mut self) {
         while let Ok(ev) = self.engine.events.try_recv() {
             match ev {
-                UiEvent::ConfigLoaded { my_call, input_device, output_device } => {
+                UiEvent::ConfigLoaded { my_call, input_device, output_device, rig_model, rig_port, rig_baud } => {
                     log::info!("[UI] ConfigLoaded event received");
                     
                     if !my_call.is_empty() { self.my_call = my_call.clone(); }
@@ -206,6 +206,14 @@ impl Msk2kEguiApp {
                     }
                     if let Some(out_d) = output_device {
                         if self.out_devs.contains(&out_d) { self.sel_out = Some(out_d); }
+                    }
+
+                    // Restore rig settings from config
+                    if !rig_model.is_empty() { self.rig_model = rig_model; }
+                    if !rig_port.is_empty() { self.rig_port = rig_port; }
+                    if !rig_baud.is_empty() { self.rig_baud = rig_baud; }
+                    if !self.rig_model.is_empty() || !self.rig_port.is_empty() {
+                        self.hamlib_enabled = true;
                     }
 
                     if !self.my_call.is_empty() && self.my_call != "NOCALL" && self.sel_in.is_some() {

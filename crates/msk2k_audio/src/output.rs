@@ -68,33 +68,50 @@ impl AudioOutput {
         &mut self,
         rx: mpsc::UnboundedReceiver<Vec<AudioSample>>,
     ) -> Result<(), OutputError> {
-        // Query the device's default config to get supported channels/sample rate
-        let default_cfg = self.device.default_output_config();
-        let (use_channels, use_buffer_size) = match &default_cfg {
-            Ok(cfg) => {
-                let ch = cfg.channels();
-                log::info!("[AUDIO OUT] Device default config: {}Hz, {} ch, {:?}", 
-                    cfg.sample_rate().0, ch, cfg.sample_format());
-                // Use device's channel count but our sample rate
-                // Use Default buffer size on Windows to avoid WASAPI rejection
-                (ch, cpal::BufferSize::Default)
-            }
-            Err(e) => {
-                log::warn!("[AUDIO OUT] Could not query default config: {}, using requested config", e);
-                (self.config.channels, cpal::BufferSize::Fixed(self.config.buffer_size as u32))
-            }
-        };
-
-        let stream_config = StreamConfig {
-            channels: use_channels,
+        let requested_config = StreamConfig {
+            channels: self.config.channels,
             sample_rate: cpal::SampleRate(self.config.sample_rate),
-            buffer_size: use_buffer_size,
+            buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
         };
 
-        log::info!("[AUDIO OUT] Opening stream: {}Hz, {} ch, buffer={:?}", 
-            self.config.sample_rate, use_channels, use_buffer_size);
+        // Try requested config first (works on macOS), fall back to device default (needed for Windows WASAPI)
+        let (stream_config, channels) = {
+            let test_stream = self.device.build_output_stream(
+                &requested_config,
+                |_: &mut [f32], _: &cpal::OutputCallbackInfo| {},
+                |_| {},
+                None,
+            );
 
-        let channels = use_channels as usize;
+            if test_stream.is_ok() {
+                drop(test_stream);
+                log::info!("[AUDIO OUT] Using requested config: {}Hz, {} ch, {} buf",
+                    self.config.sample_rate, self.config.channels, self.config.buffer_size);
+                (requested_config, self.config.channels as usize)
+            } else {
+                log::info!("[AUDIO OUT] Requested config not supported, querying device default...");
+                let default_cfg = self.device.default_output_config();
+                match default_cfg {
+                    Ok(cfg) => {
+                        let ch = cfg.channels();
+                        log::info!("[AUDIO OUT] Device default: {}Hz, {} ch — using {} ch with our sample rate",
+                            cfg.sample_rate().0, ch, ch);
+                        let fallback = StreamConfig {
+                            channels: ch,
+                            sample_rate: cpal::SampleRate(self.config.sample_rate),
+                            buffer_size: cpal::BufferSize::Default,
+                        };
+                        (fallback, ch as usize)
+                    }
+                    Err(e) => {
+                        log::warn!("[AUDIO OUT] Cannot query default config: {}. Trying requested config anyway.", e);
+                        (requested_config, self.config.channels as usize)
+                    }
+                }
+            }
+        };
+
+        let channels = channels;
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
         // Buffer to hold samples between callbacks
