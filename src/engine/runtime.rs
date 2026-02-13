@@ -24,27 +24,22 @@ pub fn start() -> EngineHandle {
     let (evt_tx, events) = mpsc::unbounded_channel::<UiEvent>();
 
     fn get_rigctld_path() -> String {
-    // 1. Check relative to the executable (for bundled apps)
+    let binary_name = if cfg!(target_os = "windows") { "rigctld.exe" } else { "rigctld" };
     if let Ok(mut path) = std::env::current_exe() {
-        path.pop(); // Remove "msk2k" filename
-        // Check for ./rigctld
-        let local_path = path.join("rigctld"); 
+        path.pop();
+        let local_path = path.join(binary_name); 
         if local_path.exists() {
             log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", local_path);
             return local_path.to_string_lossy().to_string();
         }
-        
-        // Check for ./tools/rigctld (Clean folder structure)
-        let tools_path = path.join("tools").join("rigctld");
+        let tools_path = path.join("tools").join(binary_name);
         if tools_path.exists() {
             log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", tools_path);
             return tools_path.to_string_lossy().to_string();
         }
     }
-
-    // 2. Fallback: Assume user installed it globally (Homebrew/Linux package)
     log::info!("[LAUNCHER] Using system rigctld (not bundled)");
-    "rigctld".to_string()
+    binary_name.to_string()
 }
 rt.spawn(async move {
         if let Err(e) = run_runtime(cmd_rx, evt_tx).await {
@@ -137,28 +132,22 @@ fn save_config(cfg: &AppConfig) {
     }
 }
 fn get_rigctld_path() -> String {
-    // 1. Check relative to the executable (for bundled apps)
+    let binary_name = if cfg!(target_os = "windows") { "rigctld.exe" } else { "rigctld" };
     if let Ok(mut path) = std::env::current_exe() {
-        path.pop(); // Remove "msk2k" filename
-        
-        // Check for ./rigctld
-        let local_path = path.join("rigctld"); 
+        path.pop();
+        let local_path = path.join(binary_name); 
         if local_path.exists() {
             log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", local_path);
             return local_path.to_string_lossy().to_string();
         }
-        
-        // Check for ./tools/rigctld (Clean folder structure)
-        let tools_path = path.join("tools").join("rigctld");
+        let tools_path = path.join("tools").join(binary_name);
         if tools_path.exists() {
             log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", tools_path);
             return tools_path.to_string_lossy().to_string();
         }
     }
-
-    // 2. Fallback: Assume user installed it globally (Homebrew/Linux package)
     log::info!("[LAUNCHER] Using system rigctld (not bundled)");
-    "rigctld".to_string()
+    binary_name.to_string()
 }
 async fn run_runtime(
     mut cmd_rx: mpsc::UnboundedReceiver<UiCmd>,
