@@ -1,5 +1,5 @@
 # MSK2K
-**A Soft-Deceision Meteor Scatter Mode with Accumulation for Weak Signal DX**
+**A Soft-Decision Meteor Scatter Mode with Accumulation for Weak Signal DX**
 
 ![MSK2K Screenshot](screenshot.png)
 
