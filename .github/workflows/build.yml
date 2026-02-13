@@ -104,7 +104,8 @@ jobs:
         # 4. Copy rigctld.exe to tools/
         Copy-Item "hamlib_temp/hamlib-w64-4.5.5/bin/rigctld.exe" -Destination "release_pkg/tools/"
         
-        # 5. Copy necessary DLLs next to your app (Critical for Windows!)
+        # 5. Copy DLLs to BOTH locations (tools/ for rigctld, root for msk2k)
+        Copy-Item "hamlib_temp/hamlib-w64-4.5.5/bin/*.dll" -Destination "release_pkg/tools/"
         Copy-Item "hamlib_temp/hamlib-w64-4.5.5/bin/*.dll" -Destination "release_pkg/"
         
         # 6. Zip it
