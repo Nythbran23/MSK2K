@@ -68,13 +68,33 @@ impl AudioOutput {
         &mut self,
         rx: mpsc::UnboundedReceiver<Vec<AudioSample>>,
     ) -> Result<(), OutputError> {
-        let stream_config = StreamConfig {
-            channels: self.config.channels,
-            sample_rate: cpal::SampleRate(self.config.sample_rate),
-            buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
+        // Query the device's default config to get supported channels/sample rate
+        let default_cfg = self.device.default_output_config();
+        let (use_channels, use_buffer_size) = match &default_cfg {
+            Ok(cfg) => {
+                let ch = cfg.channels();
+                log::info!("[AUDIO OUT] Device default config: {}Hz, {} ch, {:?}", 
+                    cfg.sample_rate().0, ch, cfg.sample_format());
+                // Use device's channel count but our sample rate
+                // Use Default buffer size on Windows to avoid WASAPI rejection
+                (ch, cpal::BufferSize::Default)
+            }
+            Err(e) => {
+                log::warn!("[AUDIO OUT] Could not query default config: {}, using requested config", e);
+                (self.config.channels, cpal::BufferSize::Fixed(self.config.buffer_size as u32))
+            }
         };
 
-        let channels = self.config.channels as usize;
+        let stream_config = StreamConfig {
+            channels: use_channels,
+            sample_rate: cpal::SampleRate(self.config.sample_rate),
+            buffer_size: use_buffer_size,
+        };
+
+        log::info!("[AUDIO OUT] Opening stream: {}Hz, {} ch, buffer={:?}", 
+            self.config.sample_rate, use_channels, use_buffer_size);
+
+        let channels = use_channels as usize;
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
 
         // Buffer to hold samples between callbacks

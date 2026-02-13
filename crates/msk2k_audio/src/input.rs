@@ -65,13 +65,31 @@ impl AudioInput {
     /// The channel will receive Vec<f32> buffers at the configured sample rate.
     /// Stereo audio will be downmixed to mono if channels > 1.
     pub fn start(&mut self, tx: mpsc::UnboundedSender<Vec<AudioSample>>) -> Result<(), InputError> {
-        let stream_config = StreamConfig {
-            channels: self.config.channels,
-            sample_rate: cpal::SampleRate(self.config.sample_rate),
-            buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
+        // Query the device's default config to get supported channels
+        let default_cfg = self.device.default_input_config();
+        let (use_channels, use_buffer_size) = match &default_cfg {
+            Ok(cfg) => {
+                let ch = cfg.channels();
+                log::info!("[AUDIO IN] Device default config: {}Hz, {} ch, {:?}", 
+                    cfg.sample_rate().0, ch, cfg.sample_format());
+                (ch, cpal::BufferSize::Default)
+            }
+            Err(e) => {
+                log::warn!("[AUDIO IN] Could not query default config: {}, using requested config", e);
+                (self.config.channels, cpal::BufferSize::Fixed(self.config.buffer_size as u32))
+            }
         };
 
-        let channels = self.config.channels as usize;
+        let stream_config = StreamConfig {
+            channels: use_channels,
+            sample_rate: cpal::SampleRate(self.config.sample_rate),
+            buffer_size: use_buffer_size,
+        };
+
+        log::info!("[AUDIO IN] Opening stream: {}Hz, {} ch, buffer={:?}", 
+            self.config.sample_rate, use_channels, use_buffer_size);
+
+        let channels = use_channels as usize;
         let tx = Arc::new(tx);
 
         // Build the input stream
