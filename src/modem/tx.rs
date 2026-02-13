@@ -428,11 +428,16 @@ fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
 }
 
 fn parse_device_suffix(display_name: &str) -> (String, String) {
+    // Only match suffixes WE added: (RX), (TX), (RX/TX), or (N) where N is a number
+    // Windows device names like "Speakers (2- USB Audio CODEC )" must NOT be split
     if let Some(pos) = display_name.rfind(" (") {
         if display_name.ends_with(')') {
-            let suffix = &display_name[pos+2..display_name.len()-1];
-            return (display_name[..pos].to_string(), suffix.to_string());
+            let suffix = display_name[pos+2..display_name.len()-1].trim();
+            if suffix == "RX" || suffix == "TX" || suffix == "RX/TX" || suffix.chars().all(|c| c.is_ascii_digit()) {
+                return (display_name[..pos].to_string(), suffix.to_string());
+            }
         }
     }
-    (display_name.to_string(), "1".to_string())
+    // No known suffix — the entire string is the device name
+    (display_name.to_string(), String::new())
 }
