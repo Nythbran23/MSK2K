@@ -91,20 +91,53 @@ jobs:
         CONTENTS="$APP_DIR/Contents"
         MACOS="$CONTENTS/MacOS"
         RESOURCES="$CONTENTS/Resources"
+        FRAMEWORKS="$CONTENTS/Frameworks"
 
-        mkdir -p "$MACOS" "$RESOURCES"
+        mkdir -p "$MACOS/tools" "$RESOURCES" "$FRAMEWORKS"
 
         # Copy main binary
         cp target/${{ matrix.target }}/release/${{ matrix.asset_name }} "$MACOS/msk2k"
         chmod +x "$MACOS/msk2k"
 
         # Copy rigctld into the bundle
-        mkdir -p "$MACOS/tools"
         cp $(brew --prefix)/bin/rigctld "$MACOS/tools/rigctld"
         chmod +x "$MACOS/tools/rigctld"
 
+        # Bundle libhamlib and its dependencies
+        HAMLIB_LIB=$(brew --prefix hamlib)/lib
+        echo "Hamlib lib dir: $HAMLIB_LIB"
+        ls -la "$HAMLIB_LIB"/libhamlib*.dylib
+
+        # Copy the main hamlib dylib (follow symlinks to get the real file)
+        cp -L "$HAMLIB_LIB/libhamlib.4.dylib" "$FRAMEWORKS/libhamlib.4.dylib"
+
+        # Find what rigctld links to and rewrite the paths
+        echo "=== rigctld dependencies before ==="
+        otool -L "$MACOS/tools/rigctld"
+
+        # Rewrite rigctld to look for libhamlib in @executable_path/../Frameworks/
+        install_name_tool -change \
+          "$(otool -L "$MACOS/tools/rigctld" | grep libhamlib | awk '{print $1}')" \
+          "@executable_path/../Frameworks/libhamlib.4.dylib" \
+          "$MACOS/tools/rigctld"
+
+        # Also fix the dylib's own install name
+        install_name_tool -id \
+          "@executable_path/../Frameworks/libhamlib.4.dylib" \
+          "$FRAMEWORKS/libhamlib.4.dylib"
+
+        echo "=== rigctld dependencies after ==="
+        otool -L "$MACOS/tools/rigctld"
+
+        # Check if libhamlib itself has any non-system dependencies
+        echo "=== libhamlib dependencies ==="
+        otool -L "$FRAMEWORKS/libhamlib.4.dylib"
+
         # Create Info.plist
-        cat > "$CONTENTS/Info.plist" << 'PLIST'
+        VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        echo "Version from Cargo.toml: $VERSION"
+
+        cat > "$CONTENTS/Info.plist" << PLIST
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
@@ -116,9 +149,9 @@ jobs:
             <key>CFBundleIdentifier</key>
             <string>com.thedxshop.msk2k</string>
             <key>CFBundleVersion</key>
-            <string>0.1.13</string>
+            <string>${VERSION}</string>
             <key>CFBundleShortVersionString</key>
-            <string>0.1.13</string>
+            <string>${VERSION}</string>
             <key>CFBundleExecutable</key>
             <string>msk2k</string>
             <key>CFBundlePackageType</key>
@@ -133,7 +166,7 @@ jobs:
         </plist>
         PLIST
 
-        echo "App bundle created:"
+        echo "=== App bundle contents ==="
         find "$APP_DIR" -type f
 
     - name: Code Sign macOS App Bundle
@@ -154,13 +187,21 @@ jobs:
         </plist>
         ENT
 
-        # Sign rigctld first (nested code must be signed before the outer bundle)
+        # Sign from inside out: frameworks first, then nested binaries, then the bundle
+
+        # 1. Sign the bundled libhamlib
+        codesign --force --options runtime \
+          --sign "$IDENTITY" \
+          --timestamp \
+          MSK2K.app/Contents/Frameworks/libhamlib.4.dylib
+
+        # 2. Sign rigctld
         codesign --force --options runtime \
           --sign "$IDENTITY" \
           --timestamp \
           MSK2K.app/Contents/MacOS/tools/rigctld
 
-        # Sign the main app bundle (deep signs everything, but we do it explicitly)
+        # 3. Sign the main app bundle
         codesign --force --options runtime \
           --sign "$IDENTITY" \
           --timestamp \
@@ -174,13 +215,11 @@ jobs:
     - name: Create DMG
       if: runner.os == 'macOS'
       run: |
-        # Create a DMG from the signed .app
         hdiutil create -volname "MSK2K" \
           -srcfolder MSK2K.app \
           -ov -format UDZO \
           MSK2K_unsigned.dmg
 
-        # Sign the DMG itself
         IDENTITY=$(security find-identity -v -p codesigning $RUNNER_TEMP/app-signing.keychain-db | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
         codesign --force --sign "$IDENTITY" --timestamp MSK2K_unsigned.dmg
 
@@ -201,12 +240,11 @@ jobs:
           --team-id "$APPLE_TEAM_ID" \
           --wait --timeout 30m
 
-        # Staple the notarization ticket to the DMG
         xcrun stapler staple ${{ matrix.artifact_name }}
 
         echo "Notarization and stapling complete!"
 
-    # --- 5. PREPARE PACKAGE (Linux and Windows only now) ---
+    # --- 5. PREPARE PACKAGE (Linux and Windows only) ---
 
     # LINUX PACKAGE
     - name: Bundle Linux
