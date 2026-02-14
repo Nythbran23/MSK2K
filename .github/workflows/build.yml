@@ -31,7 +31,7 @@ jobs:
           # macOS (Apple Silicon)
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: MSK2K_macOS.zip
+            artifact_name: MSK2K_macOS.dmg
             asset_name: msk2k
 
     steps:
@@ -72,50 +72,141 @@ jobs:
 
         echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
 
-        # Create and configure temporary keychain
         security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
         security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
         security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
 
-        # Import certificate (without -t and -f flags for compatibility)
         security import $CERTIFICATE_PATH -P "$CERTIFICATE_PASSWORD" \
           -A -k $KEYCHAIN_PATH
         security set-key-partition-list -S apple-tool:,apple: \
           -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
         security list-keychains -d user -s $KEYCHAIN_PATH
 
-        # Verify signing identity is available
         security find-identity -v -p codesigning $KEYCHAIN_PATH
 
-    - name: Code Sign macOS Binary
+    - name: Create macOS .app Bundle
       if: runner.os == 'macOS'
       run: |
-        # Find the Developer ID identity automatically
+        APP_DIR="MSK2K.app"
+        CONTENTS="$APP_DIR/Contents"
+        MACOS="$CONTENTS/MacOS"
+        RESOURCES="$CONTENTS/Resources"
+
+        mkdir -p "$MACOS" "$RESOURCES"
+
+        # Copy main binary
+        cp target/${{ matrix.target }}/release/${{ matrix.asset_name }} "$MACOS/msk2k"
+        chmod +x "$MACOS/msk2k"
+
+        # Copy rigctld into the bundle
+        mkdir -p "$MACOS/tools"
+        cp $(brew --prefix)/bin/rigctld "$MACOS/tools/rigctld"
+        chmod +x "$MACOS/tools/rigctld"
+
+        # Create Info.plist
+        cat > "$CONTENTS/Info.plist" << 'PLIST'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleName</key>
+            <string>MSK2K</string>
+            <key>CFBundleDisplayName</key>
+            <string>MSK2K</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.thedxshop.msk2k</string>
+            <key>CFBundleVersion</key>
+            <string>0.1.13</string>
+            <key>CFBundleShortVersionString</key>
+            <string>0.1.13</string>
+            <key>CFBundleExecutable</key>
+            <string>msk2k</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>12.0</string>
+            <key>NSMicrophoneUsageDescription</key>
+            <string>MSK2K needs microphone access for audio input from your radio.</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+        </dict>
+        </plist>
+        PLIST
+
+        echo "App bundle created:"
+        find "$APP_DIR" -type f
+
+    - name: Code Sign macOS App Bundle
+      if: runner.os == 'macOS'
+      run: |
         IDENTITY=$(security find-identity -v -p codesigning $RUNNER_TEMP/app-signing.keychain-db | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
         echo "Signing with identity: $IDENTITY"
 
-        # Sign the main binary with hardened runtime
+        # Create entitlements file for audio access
+        cat > entitlements.plist << 'ENT'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>com.apple.security.device.audio-input</key>
+            <true/>
+        </dict>
+        </plist>
+        ENT
+
+        # Sign rigctld first (nested code must be signed before the outer bundle)
         codesign --force --options runtime \
           --sign "$IDENTITY" \
           --timestamp \
-          target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+          MSK2K.app/Contents/MacOS/tools/rigctld
 
-        # Verify the signature
-        codesign --verify --verbose target/${{ matrix.target }}/release/${{ matrix.asset_name }}
+        # Sign the main app bundle (deep signs everything, but we do it explicitly)
+        codesign --force --options runtime \
+          --sign "$IDENTITY" \
+          --timestamp \
+          --entitlements entitlements.plist \
+          MSK2K.app
 
-    - name: Code Sign rigctld
+        # Verify
+        codesign --verify --deep --strict --verbose=2 MSK2K.app
+        echo "Signature verified OK"
+
+    - name: Create DMG
       if: runner.os == 'macOS'
       run: |
+        # Create a DMG from the signed .app
+        hdiutil create -volname "MSK2K" \
+          -srcfolder MSK2K.app \
+          -ov -format UDZO \
+          MSK2K_unsigned.dmg
+
+        # Sign the DMG itself
         IDENTITY=$(security find-identity -v -p codesigning $RUNNER_TEMP/app-signing.keychain-db | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        codesign --force --sign "$IDENTITY" --timestamp MSK2K_unsigned.dmg
 
-        # Sign rigctld too, otherwise macOS may block it
-        RIGCTLD_PATH=$(brew --prefix)/bin/rigctld
-        codesign --force --options runtime \
-          --sign "$IDENTITY" \
-          --timestamp \
-          "$RIGCTLD_PATH"
+        mv MSK2K_unsigned.dmg ${{ matrix.artifact_name }}
+        echo "DMG created: ${{ matrix.artifact_name }}"
+        ls -la ${{ matrix.artifact_name }}
 
-    # --- 5. PREPARE PACKAGE ---
+    - name: Notarize macOS DMG
+      if: runner.os == 'macOS'
+      env:
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      run: |
+        xcrun notarytool submit ${{ matrix.artifact_name }} \
+          --apple-id "$APPLE_ID" \
+          --password "$APPLE_ID_PASSWORD" \
+          --team-id "$APPLE_TEAM_ID" \
+          --wait --timeout 30m
+
+        # Staple the notarization ticket to the DMG
+        xcrun stapler staple ${{ matrix.artifact_name }}
+
+        echo "Notarization and stapling complete!"
+
+    # --- 5. PREPARE PACKAGE (Linux and Windows only now) ---
 
     # LINUX PACKAGE
     - name: Bundle Linux
@@ -124,16 +215,6 @@ jobs:
         mkdir -p release_pkg/tools
         cp target/${{ matrix.target }}/release/${{ matrix.asset_name }} release_pkg/
         cp /usr/bin/rigctld release_pkg/tools/
-        cd release_pkg
-        zip -r ../${{ matrix.artifact_name }} .
-
-    # MACOS PACKAGE
-    - name: Bundle macOS
-      if: runner.os == 'macOS'
-      run: |
-        mkdir -p release_pkg/tools
-        cp target/${{ matrix.target }}/release/${{ matrix.asset_name }} release_pkg/
-        cp $(brew --prefix)/bin/rigctld release_pkg/tools/
         cd release_pkg
         zip -r ../${{ matrix.artifact_name }} .
 
@@ -151,37 +232,20 @@ jobs:
         Copy-Item "hamlib_temp/hamlib-w64-4.5.5/bin/*.dll" -Destination "release_pkg/"
         Compress-Archive -Path "release_pkg/*" -DestinationPath "${{ matrix.artifact_name }}"
 
-    # --- 6. NOTARIZE macOS package ---
-    - name: Notarize macOS Package
-      if: runner.os == 'macOS'
-      env:
-        APPLE_ID: ${{ secrets.APPLE_ID }}
-        APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-        APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      run: |
-        # Submit the zip for notarization
-        xcrun notarytool submit ${{ matrix.artifact_name }} \
-          --apple-id "$APPLE_ID" \
-          --password "$APPLE_ID_PASSWORD" \
-          --team-id "$APPLE_TEAM_ID" \
-          --wait --timeout 30m
-
-        echo "Notarization complete!"
-
-    # --- 7. Clean up keychain ---
+    # --- 6. Clean up keychain ---
     - name: Clean up Apple keychain
       if: runner.os == 'macOS' && always()
       run: |
         security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
 
-    # --- 8. Upload Artifacts ---
+    # --- 7. Upload Artifacts ---
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact_name }}
         path: ${{ matrix.artifact_name }}
 
-  # --- 9. CREATE RELEASE (Only on Tag push) ---
+  # --- 8. CREATE RELEASE (Only on Tag push) ---
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
@@ -204,4 +268,4 @@ jobs:
         files: |
           artifacts/MSK2K_Linux.zip/MSK2K_Linux.zip
           artifacts/MSK2K_Windows.zip/MSK2K_Windows.zip
-          artifacts/MSK2K_macOS.zip/MSK2K_macOS.zip
+          artifacts/MSK2K_macOS.dmg/MSK2K_macOS.dmg
