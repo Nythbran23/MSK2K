@@ -108,11 +108,15 @@ chmod +x ~/Downloads/msk2k-macos
 On first run, macOS may block it. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
 
 #### Linux
-Download `msk2k-linux`, then open a terminal:
+Download and extract the `MSK2K_Linux.tar.gz` archive, then open a terminal:
 ```bash
-chmod +x ~/Downloads/msk2k-linux
-~/Downloads/msk2k-linux
+tar xzf MSK2K_Linux.tar.gz
+cd MSK2K_Linux
+chmod +x msk2k
+./msk2k
 ```
+
+The archive includes `msk2k` and a bundled `tools/rigctld` for CAT control — no separate Hamlib installation is required.
 
 **Runtime dependencies** (most desktop installs already have these):
 
@@ -131,7 +135,44 @@ Fedora/RHEL:
 sudo dnf install alsa-lib libX11 libwayland-client libxkbcommon
 ```
 
-> **Note:** The ALSA warnings in the terminal output (e.g. `Cannot get card index`) are normal and can be safely ignored.
+> **Note:** ALSA warnings in the terminal output (e.g. `Cannot get card index`) are normal and can be safely ignored.
+
+##### Linux Audio Device Selection
+
+On Linux, USB audio CODECs (such as those built into the Icom IC-7300, IC-9700, and similar rigs) appear as ALSA devices. MSK2K scans both cpal and ALSA to populate the device list.
+
+You will typically see two variants of each device in the Settings dropdown:
+
+| Device Name | Description |
+|---|---|
+| `hw:CARD=CODEC,DEV=0` | Direct ALSA hardware access. Fixed format — may require i16 sample conversion. |
+| `plughw:CARD=CODEC,DEV=0` | ALSA plugin layer. Handles sample rate and format conversion automatically. **Recommended.** |
+
+**Select `plughw:CARD=CODEC,DEV=0` for both Input and Output.** The `plughw:` variant is more reliable across different USB audio interfaces because it handles format negotiation (sample rate, bit depth, channel count) transparently.
+
+Unlike Windows and macOS where USB CODECs appear as separate Input and Output devices, Linux/ALSA presents a single device that handles both directions. MSK2K manages the half-duplex switching automatically — the receive stream is released before transmit, and restarted afterward.
+
+##### Linux CAT Control (Rig Control)
+
+MSK2K includes a bundled `rigctld` (from Hamlib) in the `tools/` directory. When you enable CAT control in Settings, MSK2K automatically launches and manages this process.
+
+To configure CAT control:
+
+1. Open **Settings** and tick **Enable CAT Control**.
+2. Select your rig from the **Rig Selection** dropdown (e.g. Icom IC-9700).
+3. Select the serial port from the **Serial Port** dropdown (typically `/dev/ttyUSB0`).
+4. Set the **Baud Rate** to match your rig's CI-V settings (e.g. `19200`).
+5. Click **Save & Close**.
+
+The frequency should appear in the top bar within a few seconds. PTT is controlled via CI-V commands through the same serial connection.
+
+> **Tip:** If the serial port does not appear in the dropdown, check that your user is in the `dialout` group:
+> ```bash
+> sudo usermod -aG dialout $USER
+> ```
+> Then log out and back in for the change to take effect.
+
+---
 
 ### Building from Source
 
