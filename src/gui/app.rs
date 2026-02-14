@@ -930,15 +930,14 @@ fn extract_callsign(text: &str) -> Option<String> {
 
 fn push_cap_entry(v: &mut Vec<LogEntry>, s: LogEntry) { if v.len() >= 100 { v.remove(0); } v.push(s); }
 
-/// Parse `arecord -l` or `aplay -l` output into `hw:CARD=Name,DEV=N` strings.
-/// Example line: "card 1: CODEC [USB Audio CODEC], device 0: USB Audio [USB Audio]"
-/// Returns: ["hw:CARD=CODEC,DEV=0"]
+/// Parse `arecord -l` or `aplay -l` output into ALSA device name strings.
+/// Returns both `hw:CARD=Name,DEV=N` and `plughw:CARD=Name,DEV=N` variants.
+/// The `plughw:` variant handles format conversion and allows concurrent RX/TX access.
 #[cfg(target_os = "linux")]
 fn parse_alsa_card_list(text: &str) -> Vec<String> {
     let mut result = Vec::new();
     for line in text.lines() {
         if !line.starts_with("card ") { continue; }
-        // Extract card name (between "card N: " and " [")
         let after_colon = match line.split_once(": ") {
             Some((_, rest)) => rest,
             None => continue,
@@ -947,7 +946,6 @@ fn parse_alsa_card_list(text: &str) -> Vec<String> {
             Some((name, _)) => name,
             None => continue,
         };
-        // Extract device number (between "device " and ":")
         let dev_num = if let Some(pos) = line.find("device ") {
             let after = &line[pos + 7..];
             match after.split_once(':') {
@@ -956,8 +954,8 @@ fn parse_alsa_card_list(text: &str) -> Vec<String> {
             }
         } else { continue };
         
-        let alsa_name = format!("hw:CARD={},DEV={}", card_name, dev_num);
-        result.push(alsa_name);
+        result.push(format!("hw:CARD={},DEV={}", card_name, dev_num));
+        result.push(format!("plughw:CARD={},DEV={}", card_name, dev_num));
     }
     result
 }

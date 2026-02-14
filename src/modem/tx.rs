@@ -238,6 +238,42 @@ fn build_output_and_sender(cfg: &TxAudioCfg) -> Result<(AudioOutput, mpsc::Unbou
             manager.get_output_device(Some(&base))
                 .or_else(|_| manager.get_output_device(Some(name)))
                 .or_else(|_| {
+                    // 🟢 LINUX: Try opening the ALSA device from the INPUT device list
+                    // On some ALSA backends, USB CODECs only appear in input enumeration
+                    // but can still be opened for output
+                    #[cfg(target_os = "linux")]
+                    {
+                        use cpal::traits::{HostTrait, DeviceTrait};
+                        let host = cpal::default_host();
+                        if base.starts_with("hw:") || base.starts_with("plughw:") {
+                            log::info!("[TX] Trying to find ALSA device '{}' in input_devices() for output use", base);
+                            if let Ok(devs) = host.input_devices() {
+                                for dev in devs {
+                                    if let Ok(n) = dev.name() {
+                                        if n == base {
+                                            log::info!("[TX] Found '{}' in input_devices() — using for output (ALSA allows this)", n);
+                                            return Ok(dev);
+                                        }
+                                    }
+                                }
+                            }
+                            // Also try plughw: variant of hw: device
+                            if base.starts_with("hw:") {
+                                let plughw = format!("plughw:{}", &base[3..]);
+                                log::info!("[TX] Trying plughw: variant '{}' in input_devices()", plughw);
+                                if let Ok(devs) = host.input_devices() {
+                                    for dev in devs {
+                                        if let Ok(n) = dev.name() {
+                                            if n == plughw {
+                                                log::info!("[TX] Found '{}' in input_devices() — using for output", n);
+                                                return Ok(dev);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     log::warn!("[TX] All device lookups failed, using system default output");
                     manager.default_output_device()
                 })
@@ -434,6 +470,52 @@ fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
                 if let Ok(name) = dev.name() {
                     if name == base_name {
                         log::info!("[TX] Found ALSA device by name: '{}' — attempting to use for output", name);
+                        return Some(dev);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Strategy 4: If hw: device not found, try plughw: equivalent
+    // plughw: handles format conversion and may allow concurrent access with RX
+    if base_name.starts_with("hw:") {
+        let plughw_name = format!("plughw:{}", &base_name[3..]);
+        log::info!("[TX] Trying plughw: equivalent: '{}'", plughw_name);
+        
+        // Try output_devices() first
+        if let Ok(devs) = host.output_devices() {
+            for dev in devs {
+                if let Ok(name) = dev.name() {
+                    if name == plughw_name {
+                        log::info!("[TX] Found plughw: output device: '{}'", name);
+                        return Some(dev);
+                    }
+                }
+            }
+        }
+        // Try all devices
+        if let Ok(devs) = host.devices() {
+            for dev in devs {
+                if let Ok(name) = dev.name() {
+                    if name == plughw_name {
+                        log::info!("[TX] Found plughw: device by name: '{}'", name);
+                        return Some(dev);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Strategy 5: If plughw: was requested but not found, try hw: equivalent
+    if base_name.starts_with("plughw:") {
+        let hw_name = format!("hw:{}", &base_name[7..]);
+        log::info!("[TX] Trying hw: equivalent: '{}'", hw_name);
+        if let Ok(devs) = host.devices() {
+            for dev in devs {
+                if let Ok(name) = dev.name() {
+                    if name == hw_name {
+                        log::info!("[TX] Found hw: device by name: '{}'", name);
                         return Some(dev);
                     }
                 }
