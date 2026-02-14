@@ -117,17 +117,23 @@ impl AudioOutput {
         // Buffer to hold samples between callbacks
         let sample_buffer: Arc<std::sync::Mutex<Vec<f32>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sample_buffer_clone = sample_buffer.clone();
+        let sample_buffer_f32 = sample_buffer.clone();
+        let sample_buffer_i16 = sample_buffer.clone();
+
+        let rx_f32 = rx.clone();
+        let rx_i16 = rx.clone();
+        let channels_i16 = channels;
 
         // Build the output stream
+        // Try f32 first (works on macOS/Windows), fall back to i16 (needed for raw ALSA USB audio)
         let stream = self.device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut buffer = sample_buffer_clone.lock().unwrap();
+                let mut buffer = sample_buffer_f32.lock().unwrap();
 
                 // Try to refill buffer if it's running low
                 if buffer.len() < data.len() * 2 {
-                    if let Ok(new_samples) = rx.blocking_lock().try_recv() {
+                    if let Ok(new_samples) = rx_f32.blocking_lock().try_recv() {
                         buffer.extend_from_slice(&new_samples);
                     }
                 }
@@ -169,7 +175,57 @@ impl AudioOutput {
                 log::error!("Audio output stream error: {}", err);
             },
             None, // No timeout
-        )?;
+        )
+        .or_else(|e| {
+            // f32 failed — try i16 (needed for raw ALSA with USB audio CODECs like PCM2901)
+            log::info!("[AUDIO OUT] f32 format not supported ({}), trying i16 (S16_LE)...", e);
+            self.device.build_output_stream(
+                &stream_config,
+                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    let mut buffer = sample_buffer_i16.lock().unwrap();
+
+                    // Try to refill buffer if it's running low
+                    let frames = data.len() / channels_i16;
+                    if buffer.len() < frames * 2 {
+                        if let Ok(new_samples) = rx_i16.blocking_lock().try_recv() {
+                            buffer.extend_from_slice(&new_samples);
+                        }
+                    }
+
+                    if channels_i16 == 1 {
+                        let copy_len = data.len().min(buffer.len());
+                        if copy_len > 0 {
+                            for i in 0..copy_len {
+                                data[i] = (buffer[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                            }
+                            buffer.drain(..copy_len);
+                        }
+                        if copy_len < data.len() {
+                            data[copy_len..].fill(0);
+                        }
+                    } else {
+                        let copy_frames = frames.min(buffer.len());
+                        if copy_frames > 0 {
+                            for i in 0..copy_frames {
+                                let sample_i16 =
+                                    (buffer[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                                for ch in 0..channels_i16 {
+                                    data[i * channels_i16 + ch] = sample_i16;
+                                }
+                            }
+                            buffer.drain(..copy_frames);
+                        }
+                        if copy_frames < frames {
+                            data[copy_frames * channels_i16..].fill(0);
+                        }
+                    }
+                },
+                move |err| {
+                    log::error!("Audio output stream error: {}", err);
+                },
+                None,
+            )
+        })?;
 
         stream.play()?;
         self.stream = Some(StreamHolder { _stream: stream });

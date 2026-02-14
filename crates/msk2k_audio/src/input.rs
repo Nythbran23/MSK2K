@@ -111,9 +111,12 @@ impl AudioInput {
         };
 
         let channels = channels;
-        let tx = Arc::new(tx);
+        let tx_f32 = Arc::new(tx);
+        let tx_i16 = tx_f32.clone();
+        let channels_i16 = channels;
 
         // Build the input stream
+        // Try f32 first (works on macOS/Windows), fall back to i16 (needed for raw ALSA USB audio)
         let stream = self.device.build_input_stream(
             &stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -128,13 +131,37 @@ impl AudioInput {
                 };
 
                 // Send to processing channel (ignore send errors if receiver dropped)
-                let _ = tx.send(samples);
+                let _ = tx_f32.send(samples);
             },
             move |err| {
                 log::error!("Audio input stream error: {}", err);
             },
             None, // No timeout
-        )?;
+        )
+        .or_else(|e| {
+            // f32 failed — try i16 (needed for raw ALSA with USB audio CODECs like PCM2901)
+            log::info!("[AUDIO IN] f32 format not supported ({}), trying i16 (S16_LE)...", e);
+            self.device.build_input_stream(
+                &stream_config,
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    let samples: Vec<f32> = if channels_i16 == 1 {
+                        data.iter().map(|&s| s as f32 / 32768.0).collect()
+                    } else {
+                        data.chunks(channels_i16)
+                            .map(|chunk| {
+                                chunk.iter().map(|&s| s as f32 / 32768.0).sum::<f32>()
+                                    / channels_i16 as f32
+                            })
+                            .collect()
+                    };
+                    let _ = tx_i16.send(samples);
+                },
+                move |err| {
+                    log::error!("Audio input stream error: {}", err);
+                },
+                None,
+            )
+        })?;
 
         stream.play()?;
         self.stream = Some(StreamHolder { _stream: stream });
