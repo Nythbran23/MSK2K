@@ -423,6 +423,24 @@ fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
         }
     }
     
+    log::warn!("[TX] Could not resolve output device '{}' via standard lookups", display_name);
+    
+    // Strategy 3: On ALSA, hw: devices may not appear in output_devices() enumeration
+    // but can still be opened for output. Find by name in all devices.
+    if base_name.starts_with("hw:") || base_name.starts_with("plughw:") {
+        log::info!("[TX] Trying direct ALSA device lookup for '{}'", base_name);
+        if let Ok(devs) = host.devices() {
+            for dev in devs {
+                if let Ok(name) = dev.name() {
+                    if name == base_name {
+                        log::info!("[TX] Found ALSA device by name: '{}' — attempting to use for output", name);
+                        return Some(dev);
+                    }
+                }
+            }
+        }
+    }
+    
     log::warn!("[TX] Could not resolve output device '{}'", display_name);
     None
 }
