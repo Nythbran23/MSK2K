@@ -84,6 +84,29 @@ jobs:
 
         security find-identity -v -p codesigning $KEYCHAIN_PATH
 
+    - name: Create App Icon
+      if: runner.os == 'macOS'
+      run: |
+        # Convert PNG to .icns using macOS sips and iconutil
+        ICONSET="AppIcon.iconset"
+        mkdir -p "$ICONSET"
+
+        # Generate all required icon sizes from the source PNG
+        sips -z 16 16     assets/MSK2K.png --out "$ICONSET/icon_16x16.png"
+        sips -z 32 32     assets/MSK2K.png --out "$ICONSET/icon_16x16@2x.png"
+        sips -z 32 32     assets/MSK2K.png --out "$ICONSET/icon_32x32.png"
+        sips -z 64 64     assets/MSK2K.png --out "$ICONSET/icon_32x32@2x.png"
+        sips -z 128 128   assets/MSK2K.png --out "$ICONSET/icon_128x128.png"
+        sips -z 256 256   assets/MSK2K.png --out "$ICONSET/icon_128x128@2x.png"
+        sips -z 256 256   assets/MSK2K.png --out "$ICONSET/icon_256x256.png"
+        sips -z 512 512   assets/MSK2K.png --out "$ICONSET/icon_256x256@2x.png"
+        sips -z 512 512   assets/MSK2K.png --out "$ICONSET/icon_512x512.png"
+        sips -z 1024 1024 assets/MSK2K.png --out "$ICONSET/icon_512x512@2x.png"
+
+        iconutil -c icns "$ICONSET" -o AppIcon.icns
+        echo "Icon created:"
+        ls -la AppIcon.icns
+
     - name: Create macOS .app Bundle
       if: runner.os == 'macOS'
       run: |
@@ -98,6 +121,9 @@ jobs:
         # Copy main binary
         cp target/${{ matrix.target }}/release/${{ matrix.asset_name }} "$MACOS/msk2k"
         chmod +x "$MACOS/msk2k"
+
+        # Copy app icon
+        cp AppIcon.icns "$RESOURCES/AppIcon.icns"
 
         # Copy rigctld into the bundle
         cp $(brew --prefix)/bin/rigctld "$MACOS/tools/rigctld"
@@ -117,12 +143,11 @@ jobs:
 
         cp -L "$LIBUSB_LIB/libusb-1.0.0.dylib" "$FRAMEWORKS/libusb-1.0.0.dylib"
 
-        # --- Rewrite library paths ---
+        # --- Rewrite library paths using @loader_path ---
         echo "=== rigctld dependencies before ==="
         otool -L "$MACOS/tools/rigctld"
 
-        # Rewrite rigctld -> libhamlib
-        # rigctld is in Contents/MacOS/tools/ so @loader_path/../../Frameworks/ reaches Contents/Frameworks/
+        # Rewrite rigctld -> libhamlib (tools/ is one level deeper so ../../Frameworks/)
         install_name_tool -change \
           "$(otool -L "$MACOS/tools/rigctld" | grep libhamlib | awk '{print $1}')" \
           "@loader_path/../../Frameworks/libhamlib.4.dylib" \
@@ -134,7 +159,7 @@ jobs:
           "@loader_path/../../Frameworks/libusb-1.0.0.dylib" \
           "$MACOS/tools/rigctld"
 
-        # Fix libhamlib's own install name and rewrite its libusb reference
+        # Fix libhamlib's own install name and its libusb reference
         install_name_tool -id \
           "@loader_path/libhamlib.4.dylib" \
           "$FRAMEWORKS/libhamlib.4.dylib"
@@ -181,6 +206,8 @@ jobs:
             <string>msk2k</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
             <key>LSMinimumSystemVersion</key>
             <string>12.0</string>
             <key>NSMicrophoneUsageDescription</key>
@@ -243,14 +270,26 @@ jobs:
         codesign --verify --deep --strict --verbose=2 MSK2K.app
         echo "Signature verified OK"
 
-    - name: Create DMG
+    - name: Create DMG with Applications Shortcut
       if: runner.os == 'macOS'
       run: |
+        # Create a staging folder for the DMG contents
+        DMG_STAGE="dmg_stage"
+        mkdir -p "$DMG_STAGE"
+
+        # Copy the signed .app into staging
+        cp -R MSK2K.app "$DMG_STAGE/"
+
+        # Create a symlink to /Applications (the "drag here" target)
+        ln -s /Applications "$DMG_STAGE/Applications"
+
+        # Create the DMG from the staging folder
         hdiutil create -volname "MSK2K" \
-          -srcfolder MSK2K.app \
+          -srcfolder "$DMG_STAGE" \
           -ov -format UDZO \
           MSK2K_unsigned.dmg
 
+        # Sign the DMG itself
         IDENTITY=$(security find-identity -v -p codesigning $RUNNER_TEMP/app-signing.keychain-db | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
         codesign --force --sign "$IDENTITY" --timestamp MSK2K_unsigned.dmg
 
