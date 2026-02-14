@@ -103,37 +103,62 @@ jobs:
         cp $(brew --prefix)/bin/rigctld "$MACOS/tools/rigctld"
         chmod +x "$MACOS/tools/rigctld"
 
-        # Bundle libhamlib and its dependencies
+        # --- Bundle libhamlib ---
         HAMLIB_LIB=$(brew --prefix hamlib)/lib
-        echo "Hamlib lib dir: $HAMLIB_LIB"
+        echo "=== Hamlib lib dir ==="
         ls -la "$HAMLIB_LIB"/libhamlib*.dylib
 
-        # Copy the main hamlib dylib (follow symlinks to get the real file)
         cp -L "$HAMLIB_LIB/libhamlib.4.dylib" "$FRAMEWORKS/libhamlib.4.dylib"
 
-        # Find what rigctld links to and rewrite the paths
+        # --- Bundle libusb (required by rigctld and libhamlib) ---
+        LIBUSB_LIB=$(brew --prefix libusb)/lib
+        echo "=== libusb lib dir ==="
+        ls -la "$LIBUSB_LIB"/libusb*.dylib
+
+        cp -L "$LIBUSB_LIB/libusb-1.0.0.dylib" "$FRAMEWORKS/libusb-1.0.0.dylib"
+
+        # --- Rewrite library paths ---
         echo "=== rigctld dependencies before ==="
         otool -L "$MACOS/tools/rigctld"
 
-        # Rewrite rigctld to look for libhamlib in @executable_path/../Frameworks/
+        # Rewrite rigctld -> libhamlib
         install_name_tool -change \
           "$(otool -L "$MACOS/tools/rigctld" | grep libhamlib | awk '{print $1}')" \
           "@executable_path/../Frameworks/libhamlib.4.dylib" \
           "$MACOS/tools/rigctld"
 
-        # Also fix the dylib's own install name
+        # Rewrite rigctld -> libusb
+        install_name_tool -change \
+          "$(otool -L "$MACOS/tools/rigctld" | grep libusb | awk '{print $1}')" \
+          "@executable_path/../Frameworks/libusb-1.0.0.dylib" \
+          "$MACOS/tools/rigctld"
+
+        # Fix libhamlib's own install name
         install_name_tool -id \
           "@executable_path/../Frameworks/libhamlib.4.dylib" \
           "$FRAMEWORKS/libhamlib.4.dylib"
 
+        # Rewrite libhamlib -> libusb
+        install_name_tool -change \
+          "$(otool -L "$FRAMEWORKS/libhamlib.4.dylib" | grep libusb | awk '{print $1}')" \
+          "@executable_path/../Frameworks/libusb-1.0.0.dylib" \
+          "$FRAMEWORKS/libhamlib.4.dylib"
+
+        # Fix libusb's own install name
+        install_name_tool -id \
+          "@executable_path/../Frameworks/libusb-1.0.0.dylib" \
+          "$FRAMEWORKS/libusb-1.0.0.dylib"
+
         echo "=== rigctld dependencies after ==="
         otool -L "$MACOS/tools/rigctld"
 
-        # Check if libhamlib itself has any non-system dependencies
-        echo "=== libhamlib dependencies ==="
+        echo "=== libhamlib dependencies after ==="
         otool -L "$FRAMEWORKS/libhamlib.4.dylib"
 
-        # Create Info.plist
+        echo "=== libusb dependencies ==="
+        otool -L "$FRAMEWORKS/libusb-1.0.0.dylib"
+
+        # --- Create Info.plist ---
         VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
         echo "Version from Cargo.toml: $VERSION"
 
@@ -189,7 +214,13 @@ jobs:
 
         # Sign from inside out: frameworks first, then nested binaries, then the bundle
 
-        # 1. Sign the bundled libhamlib
+        # 1a. Sign the bundled libusb
+        codesign --force --options runtime \
+          --sign "$IDENTITY" \
+          --timestamp \
+          MSK2K.app/Contents/Frameworks/libusb-1.0.0.dylib
+
+        # 1b. Sign the bundled libhamlib
         codesign --force --options runtime \
           --sign "$IDENTITY" \
           --timestamp \
