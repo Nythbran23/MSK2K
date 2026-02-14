@@ -260,7 +260,7 @@ async fn run_runtime(
         
         let rig_cmd = get_rigctld_path();
         let mut cmd = Command::new(rig_cmd);
-        cmd.args(&["-m", &current_rig_model, "-r", &current_rig_port, "-s", &baud.to_string()]);
+        cmd.args(&["-m", &current_rig_model, "-r", &current_rig_port, "-s", &baud.to_string(), "-P", "RIG"]);
         
         #[cfg(target_os = "windows")]
         {
@@ -492,9 +492,19 @@ async fn run_runtime(
                         }
 
                         if !skip_launch {
-                            // Kill old process first
+                            // Kill old process first — release PTT cleanly via TCP before killing
                             if let Some(mut child) = rigctld_process.take() {
-                                log::info!("[LAUNCHER] Killing old rigctld (pid={})", child.id());
+                                log::info!("[LAUNCHER] Releasing PTT and killing old rigctld (pid={})", child.id());
+                                // Send PTT off via TCP before killing the process
+                                if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+                                    &"127.0.0.1:4532".parse().unwrap(),
+                                    std::time::Duration::from_millis(500),
+                                ) {
+                                    use std::io::Write;
+                                    let _ = stream.write_all(b"T 0\n");
+                                    let _ = stream.flush();
+                                    std::thread::sleep(std::time::Duration::from_millis(200));
+                                }
                                 let _ = child.kill();
                                 let _ = child.wait();
                                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -525,7 +535,7 @@ async fn run_runtime(
                                 
                                 let rig_cmd = get_rigctld_path();
                                 let mut cmd = Command::new(rig_cmd);
-                                cmd.args(&["-m", &rig_model, "-r", &serial_port, "-s", &baud_rate.to_string()]);
+                                cmd.args(&["-m", &rig_model, "-r", &serial_port, "-s", &baud_rate.to_string(), "-P", "RIG"]);
                                 
                                 #[cfg(target_os = "windows")]
                                 {
@@ -855,9 +865,19 @@ async fn run_runtime(
         }
     }
     
-    // Cleanup: kill rigctld on exit
+    // Cleanup: release PTT and kill rigctld on exit
     if let Some(mut child) = rigctld_process.take() {
         log::info!("[LAUNCHER] Shutting down rigctld (pid={})", child.id());
+        // Release PTT cleanly via TCP before killing
+        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:4532".parse().unwrap(),
+            std::time::Duration::from_millis(500),
+        ) {
+            use std::io::Write;
+            let _ = stream.write_all(b"T 0\n");
+            let _ = stream.flush();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         let _ = child.kill();
         let _ = child.wait();
     }
