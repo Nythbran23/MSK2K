@@ -187,9 +187,14 @@ impl Msk2kEguiApp {
     }
 
     fn refresh_serial_ports(&mut self) {
+        // 1. Start with an empty option (represents "None" / Network Only)
+        self.available_ports = vec![String::new()];
+        
+        // 2. Add the actual physical ports detected
         if let Ok(ports) = serialport::available_ports() {
-            self.available_ports = ports.into_iter().map(|p| p.port_name).collect();
-            self.available_ports.sort();
+            let mut port_names: Vec<String> = ports.into_iter().map(|p| p.port_name).collect();
+            port_names.sort();
+            self.available_ports.extend(port_names);
         }
     }
 
@@ -482,7 +487,9 @@ impl eframe::App for Msk2kEguiApp {
                                     .width(350.0)
                                     .show_ui(ui, |ui| {
                                         for p in &self.available_ports {
-                                            ui.selectable_value(&mut self.rig_port, p.clone(), p);
+                                            // If the port string is empty, show "None" label
+                                            let label = if p.is_empty() { "None (Manual/Net)" } else { p };
+                                            ui.selectable_value(&mut self.rig_port, p.clone(), label);
                                         }
                                     });
                                 if ui.button("🔄").clicked() { self.refresh_serial_ports(); }
