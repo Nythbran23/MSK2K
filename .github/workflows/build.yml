@@ -122,31 +122,31 @@ jobs:
         otool -L "$MACOS/tools/rigctld"
 
         # Rewrite rigctld -> libhamlib
+        # rigctld is in Contents/MacOS/tools/ so @loader_path/../../Frameworks/ reaches Contents/Frameworks/
         install_name_tool -change \
           "$(otool -L "$MACOS/tools/rigctld" | grep libhamlib | awk '{print $1}')" \
-          "@executable_path/../Frameworks/libhamlib.4.dylib" \
+          "@loader_path/../../Frameworks/libhamlib.4.dylib" \
           "$MACOS/tools/rigctld"
 
         # Rewrite rigctld -> libusb
         install_name_tool -change \
           "$(otool -L "$MACOS/tools/rigctld" | grep libusb | awk '{print $1}')" \
-          "@executable_path/../Frameworks/libusb-1.0.0.dylib" \
+          "@loader_path/../../Frameworks/libusb-1.0.0.dylib" \
           "$MACOS/tools/rigctld"
 
-        # Fix libhamlib's own install name
+        # Fix libhamlib's own install name and rewrite its libusb reference
         install_name_tool -id \
-          "@executable_path/../Frameworks/libhamlib.4.dylib" \
+          "@loader_path/libhamlib.4.dylib" \
           "$FRAMEWORKS/libhamlib.4.dylib"
 
-        # Rewrite libhamlib -> libusb
         install_name_tool -change \
           "$(otool -L "$FRAMEWORKS/libhamlib.4.dylib" | grep libusb | awk '{print $1}')" \
-          "@executable_path/../Frameworks/libusb-1.0.0.dylib" \
+          "@loader_path/libusb-1.0.0.dylib" \
           "$FRAMEWORKS/libhamlib.4.dylib"
 
         # Fix libusb's own install name
         install_name_tool -id \
-          "@executable_path/../Frameworks/libusb-1.0.0.dylib" \
+          "@loader_path/libusb-1.0.0.dylib" \
           "$FRAMEWORKS/libusb-1.0.0.dylib"
 
         echo "=== rigctld dependencies after ==="
@@ -155,7 +155,7 @@ jobs:
         echo "=== libhamlib dependencies after ==="
         otool -L "$FRAMEWORKS/libhamlib.4.dylib"
 
-        echo "=== libusb dependencies ==="
+        echo "=== libusb dependencies after ==="
         otool -L "$FRAMEWORKS/libusb-1.0.0.dylib"
 
         # --- Create Info.plist ---
