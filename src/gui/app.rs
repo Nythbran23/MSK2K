@@ -9,6 +9,16 @@ use crate::engine::report_calc::report_from_correlation;
 use crate::qso::adif::{AdifLogger, QsoRecord};
 
 pub fn run_gui() -> anyhow::Result<()> {
+    let icon_data = include_bytes!("../../assets/MSK2K.png");
+    let icon_image = image::load_from_memory(icon_data)
+        .expect("Failed to load icon")
+        .to_rgba8();
+    let (width, height) = icon_image.dimensions();
+    let icon = egui::IconData {
+        rgba: icon_image.into_raw(),
+        width,
+        height,
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 600.0])
