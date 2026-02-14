@@ -89,10 +89,18 @@ struct AppConfig {
     rig_port: String,
     rig_baud: String,
 }
+fn config_file_path() -> std::path::PathBuf {
+    let mut path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    path.push(".msk2k");
+    std::fs::create_dir_all(&path).ok();
+    path.push("msk2k.cfg");
+    path
+}
 
 fn load_config() -> AppConfig {
     let mut cfg = AppConfig::default();
-    if let Ok(contents) = fs::read_to_string("msk2k.cfg") {
+    let cfg_path = config_file_path();
+    if let Ok(contents) = fs::read_to_string(&cfg_path) {
         for line in contents.lines() {
             if let Some((k, v)) = line.split_once('=') {
                 match k.trim() {
@@ -139,7 +147,7 @@ fn save_config(cfg: &AppConfig) {
         cfg.rig_port,
         cfg.rig_baud
     );
-    if let Err(e) = fs::write("msk2k.cfg", data) {
+    if let Err(e) = fs::write(config_file_path(), data) {
         log::warn!("Failed to save config: {}", e);
     }
 }
