@@ -23,25 +23,7 @@ pub fn start() -> EngineHandle {
     let (cmds, cmd_rx) = mpsc::unbounded_channel::<UiCmd>();
     let (evt_tx, events) = mpsc::unbounded_channel::<UiEvent>();
 
-    fn get_rigctld_path() -> String {
-    let binary_name = if cfg!(target_os = "windows") { "rigctld.exe" } else { "rigctld" };
-    if let Ok(mut path) = std::env::current_exe() {
-        path.pop();
-        let local_path = path.join(binary_name); 
-        if local_path.exists() {
-            log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", local_path);
-            return local_path.to_string_lossy().to_string();
-        }
-        let tools_path = path.join("tools").join(binary_name);
-        if tools_path.exists() {
-            log::info!("[LAUNCHER] Found bundled rigctld at: {:?}", tools_path);
-            return tools_path.to_string_lossy().to_string();
-        }
-    }
-    log::info!("[LAUNCHER] Using system rigctld (not bundled)");
-    binary_name.to_string()
-}
-rt.spawn(async move {
+    rt.spawn(async move {
         if let Err(e) = run_runtime(cmd_rx, evt_tx).await {
             log::error!("engine runtime crashed: {e}");
         }
@@ -230,6 +212,9 @@ async fn run_runtime(
 
     // 🟢 2. Initialize Launcher Process Holder
     let mut rigctld_process: Option<Child> = None;
+    let mut launched_rig_model: String = String::new();
+    let mut launched_serial_port: String = String::new();
+    let mut launched_baud_rate: u32 = 0;
 
 
     // 🟢 AUTO-START: If valid config exists, start LISTENING immediately.
@@ -257,6 +242,47 @@ async fn run_runtime(
         let _ = evt_tx.send(UiEvent::Info(
             "Enter callsign and press LISTEN".into(),
         ));
+    }
+
+    // 🟢 AUTO-START HAMLIB: If saved config has rig model + port, launch rigctld once at startup
+    if !current_rig_model.is_empty() && !current_rig_port.is_empty() {
+        let baud: u32 = current_rig_baud.parse().unwrap_or(19200);
+        log::info!("[LAUNCHER] Auto-starting rigctld from saved config: model={} port={} baud={}", 
+            current_rig_model, current_rig_port, baud);
+        
+        // Linux: suppress DTR/RTS before opening serial port
+        #[cfg(target_os = "linux")]
+        {
+            let _ = Command::new("stty")
+                .args(&["-F", &current_rig_port, "-hupcl", "-crtscts", &baud.to_string()])
+                .output();
+        }
+        
+        let rig_cmd = get_rigctld_path();
+        let mut cmd = Command::new(rig_cmd);
+        cmd.args(&["-m", &current_rig_model, "-r", &current_rig_port, "-s", &baud.to_string()]);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        
+        match cmd.spawn() {
+            Ok(c) => {
+                log::info!("[LAUNCHER] rigctld auto-started (pid={})", c.id());
+                launched_rig_model = current_rig_model.clone();
+                launched_serial_port = current_rig_port.clone();
+                launched_baud_rate = baud;
+                rigctld_process = Some(c);
+                // Give rigctld time to bind port 4532
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                // Now connect Hamlib TCP client
+                hamlib = Some(HamlibClient::new("127.0.0.1:4532".to_string(), ham_update_tx.clone()));
+                log::info!("[LAUNCHER] Hamlib TCP client connected");
+            }
+            Err(e) => log::error!("[LAUNCHER] Auto-start failed: {}", e),
+        }
     }
     
     loop {
@@ -440,32 +466,85 @@ async fn run_runtime(
                         current_rig_port = serial_port.clone();
                         current_rig_baud = baud_rate.to_string();
 
-                        // Always kill old process first
-                        if let Some(mut child) = rigctld_process.take() {
-                            log::info!("[LAUNCHER] Killing old rigctld (pid={})", child.id());
-                            let _ = child.kill();
-                            let _ = child.wait(); // Wait for port to be released
-                            // Small delay to ensure port 4532 is freed
-                            std::thread::sleep(std::time::Duration::from_millis(300));
+                        // Check if same config is already running (skip re-launch)
+                        let mut skip_launch = false;
+                        if enable_launcher && !serial_port.is_empty()
+                            && launched_rig_model == rig_model
+                            && launched_serial_port == serial_port
+                            && launched_baud_rate == baud_rate
+                        {
+                            if let Some(ref mut child) = rigctld_process {
+                                match child.try_wait() {
+                                    Ok(Some(_status)) => {
+                                        log::warn!("[LAUNCHER] rigctld had exited — will re-launch");
+                                        rigctld_process = None;
+                                    }
+                                    Ok(None) => {
+                                        log::info!("[LAUNCHER] rigctld already running with same config — skipping");
+                                        skip_launch = true;
+                                    }
+                                    Err(e) => {
+                                        log::warn!("[LAUNCHER] Failed to check rigctld status: {} — will re-launch", e);
+                                        rigctld_process = None;
+                                    }
+                                }
+                            }
                         }
 
-                        if enable_launcher && !serial_port.is_empty() {
-                            log::info!("[LAUNCHER] Starting rigctld: Model={} Port={} Baud={}", rig_model, serial_port, baud_rate);
-                            
-                            let rig_cmd = get_rigctld_path();
-                            let mut cmd = Command::new(rig_cmd);
-                            cmd.args(&["-m", &rig_model, "-r", &serial_port, "-s", &baud_rate.to_string()]);
-                            
-                            // Hide console window on Windows
-                            #[cfg(target_os = "windows")]
-                            {
-                                use std::os::windows::process::CommandExt;
-                                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                        if !skip_launch {
+                            // Kill old process first
+                            if let Some(mut child) = rigctld_process.take() {
+                                log::info!("[LAUNCHER] Killing old rigctld (pid={})", child.id());
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                std::thread::sleep(std::time::Duration::from_millis(500));
                             }
-                            
-                            match cmd.spawn() {
-                                Ok(c) => rigctld_process = Some(c),
-                                Err(e) => log::error!("[LAUNCHER] Failed to start: {}", e),
+                            launched_rig_model.clear();
+                            launched_serial_port.clear();
+                            launched_baud_rate = 0;
+
+                            if enable_launcher && !serial_port.is_empty() {
+                                // 🟢 LINUX FIX: Suppress DTR/RTS before rigctld opens the serial port
+                                #[cfg(target_os = "linux")]
+                                {
+                                    log::info!("[LAUNCHER] Pre-configuring {} to suppress DTR/RTS", serial_port);
+                                    let stty_result = Command::new("stty")
+                                        .args(&["-F", &serial_port, "-hupcl", "-crtscts", &baud_rate.to_string()])
+                                        .output();
+                                    match stty_result {
+                                        Ok(out) => {
+                                            if !out.status.success() {
+                                                log::warn!("[LAUNCHER] stty failed: {}", String::from_utf8_lossy(&out.stderr));
+                                            }
+                                        }
+                                        Err(e) => log::warn!("[LAUNCHER] Could not run stty: {}", e),
+                                    }
+                                }
+
+                                log::info!("[LAUNCHER] Starting rigctld: Model={} Port={} Baud={}", rig_model, serial_port, baud_rate);
+                                
+                                let rig_cmd = get_rigctld_path();
+                                let mut cmd = Command::new(rig_cmd);
+                                cmd.args(&["-m", &rig_model, "-r", &serial_port, "-s", &baud_rate.to_string()]);
+                                
+                                #[cfg(target_os = "windows")]
+                                {
+                                    use std::os::windows::process::CommandExt;
+                                    cmd.creation_flags(0x08000000);
+                                }
+                                
+                                match cmd.spawn() {
+                                    Ok(c) => {
+                                        log::info!("[LAUNCHER] rigctld started (pid={})", c.id());
+                                        rigctld_process = Some(c);
+                                        launched_rig_model = rig_model;
+                                        launched_serial_port = serial_port;
+                                        launched_baud_rate = baud_rate;
+                                        // Give rigctld time to open port and bind TCP 4532
+                                        std::thread::sleep(std::time::Duration::from_millis(800));
+                                    }
+                                    Err(e) => log::error!("[LAUNCHER] Failed to start: {}", e),
+                                }
                             }
                         }
                     }

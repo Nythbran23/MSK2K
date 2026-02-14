@@ -237,21 +237,11 @@ impl Msk2kEguiApp {
                         log::info!("[UI] Auto-start detected, UI is_listening = true");
                     }
 
-                    // Auto-launch Hamlib if enabled in saved config
-                    if self.hamlib_enabled && !self.rig_model.is_empty() && !self.rig_port.is_empty() {
-                        log::info!("[UI] Auto-starting Hamlib: model={} port={}", self.rig_model, self.rig_port);
-                        let _ = self.engine.cmds.send(UiCmd::ConfigureHamlib { 
-                            enabled: true, 
-                            address: "127.0.0.1:4532".to_string(),
-                        });
-                        let baud = self.rig_baud.parse().unwrap_or(19200);
-                        let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
-                            enable_launcher: true,
-                            rig_model: self.rig_model.clone(),
-                            serial_port: self.rig_port.clone(),
-                            baud_rate: baud,
-                        });
-                    }
+                    // NOTE: Do NOT auto-launch Hamlib here.
+                    // The engine runtime handles its own auto-start from saved config.
+                    // Sending ConfigureHamlib + ConfigureLauncher from the UI on ConfigLoaded
+                    // causes a DUPLICATE rigctld spawn that conflicts with any engine-side launch.
+                    // Hamlib is only (re)launched when the user clicks "Save & Close" in Settings.
                 },
                 UiEvent::RxText { text, snr, utc_ms, rx_slot } => {
                     self.last_corr = snr.unwrap_or(self.last_corr);
@@ -536,13 +526,7 @@ impl eframe::App for Msk2kEguiApp {
             if close { 
                 self.send_apply_audio();
                 
-                // 1. Configure Hamlib
-                let _ = self.engine.cmds.send(UiCmd::ConfigureHamlib { 
-                    enabled: self.hamlib_enabled, 
-                    address: "127.0.0.1:4532".to_string(),
-                });
-
-                // 2. Configure Launcher (auto-start rigctld when CAT enabled)
+                // 1. Launch/kill rigctld FIRST (so it's ready before TCP connect)
                 if self.hamlib_enabled {
                     let baud = self.rig_baud.parse().unwrap_or(19200);
                     let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
@@ -556,6 +540,12 @@ impl eframe::App for Msk2kEguiApp {
                         enable_launcher: false, rig_model: String::new(), serial_port: String::new(), baud_rate: 0 
                     });
                 }
+
+                // 2. Configure Hamlib TCP client (connects to the rigctld we just launched)
+                let _ = self.engine.cmds.send(UiCmd::ConfigureHamlib { 
+                    enabled: self.hamlib_enabled, 
+                    address: "127.0.0.1:4532".to_string(),
+                });
 
                 // 🟢 3. RESTORE LISTENING MODE (This is the code you wanted!)
                 let _ = self.engine.cmds.send(UiCmd::Listen {
