@@ -526,26 +526,33 @@ impl eframe::App for Msk2kEguiApp {
             if close { 
                 self.send_apply_audio();
                 
-                // 1. Launch/kill rigctld FIRST (so it's ready before TCP connect)
-                if self.hamlib_enabled {
-                    let baud = self.rig_baud.parse().unwrap_or(19200);
-                    let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
-                        enable_launcher: true,
-                        rig_model: self.rig_model.clone(),
-                        serial_port: self.rig_port.clone(),
-                        baud_rate: baud,
-                    });
-                } else {
-                     let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
-                        enable_launcher: false, rig_model: String::new(), serial_port: String::new(), baud_rate: 0 
+                // 1. Only reconfigure Hamlib/Launcher if CAT settings changed
+                let cat_changed = self.hamlib_enabled != self.config.station.hamlib_enabled
+                    || self.rig_model != self.config.station.rig_model
+                    || self.rig_port != self.config.station.rig_port
+                    || self.rig_baud != self.config.station.rig_baud;
+
+                if cat_changed {
+                    if self.hamlib_enabled {
+                        let baud = self.rig_baud.parse().unwrap_or(19200);
+                        let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
+                            enable_launcher: true,
+                            rig_model: self.rig_model.clone(),
+                            serial_port: self.rig_port.clone(),
+                            baud_rate: baud,
+                        });
+                    } else {
+                         let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
+                            enable_launcher: false, rig_model: String::new(), serial_port: String::new(), baud_rate: 0 
+                        });
+                    }
+
+                    // Configure Hamlib TCP client (connects to the rigctld we just launched)
+                    let _ = self.engine.cmds.send(UiCmd::ConfigureHamlib { 
+                        enabled: self.hamlib_enabled, 
+                        address: "127.0.0.1:4532".to_string(),
                     });
                 }
-
-                // 2. Configure Hamlib TCP client (connects to the rigctld we just launched)
-                let _ = self.engine.cmds.send(UiCmd::ConfigureHamlib { 
-                    enabled: self.hamlib_enabled, 
-                    address: "127.0.0.1:4532".to_string(),
-                });
 
                 // 🟢 3. RESTORE LISTENING MODE (This is the code you wanted!)
                 let _ = self.engine.cmds.send(UiCmd::Listen {
@@ -923,6 +930,38 @@ fn extract_callsign(text: &str) -> Option<String> {
 
 fn push_cap_entry(v: &mut Vec<LogEntry>, s: LogEntry) { if v.len() >= 100 { v.remove(0); } v.push(s); }
 
+/// Parse `arecord -l` or `aplay -l` output into `hw:CARD=Name,DEV=N` strings.
+/// Example line: "card 1: CODEC [USB Audio CODEC], device 0: USB Audio [USB Audio]"
+/// Returns: ["hw:CARD=CODEC,DEV=0"]
+#[cfg(target_os = "linux")]
+fn parse_alsa_card_list(text: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    for line in text.lines() {
+        if !line.starts_with("card ") { continue; }
+        // Extract card name (between "card N: " and " [")
+        let after_colon = match line.split_once(": ") {
+            Some((_, rest)) => rest,
+            None => continue,
+        };
+        let card_name = match after_colon.split_once(' ') {
+            Some((name, _)) => name,
+            None => continue,
+        };
+        // Extract device number (between "device " and ":")
+        let dev_num = if let Some(pos) = line.find("device ") {
+            let after = &line[pos + 7..];
+            match after.split_once(':') {
+                Some((num, _)) => num.trim(),
+                None => continue,
+            }
+        } else { continue };
+        
+        let alsa_name = format!("hw:CARD={},DEV={}", card_name, dev_num);
+        result.push(alsa_name);
+    }
+    result
+}
+
 fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
@@ -955,6 +994,39 @@ fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
         }
     }
     
+    // 🟢 LINUX: Scan ALSA devices that cpal may have missed (especially USB CODECs)
+    #[cfg(target_os = "linux")]
+    {
+        let known_names: std::collections::HashSet<String> = all_devices.iter().map(|(n, _, _)| n.clone()).collect();
+        
+        // Parse arecord -l for input devices
+        if let Ok(out) = std::process::Command::new("arecord").arg("-l").output() {
+            if let Ok(text) = String::from_utf8(out.stdout) {
+                for alsa_name in parse_alsa_card_list(&text) {
+                    if !known_names.contains(&alsa_name) {
+                        log::info!("[AUDIO] Adding ALSA input device missing from cpal: {}", alsa_name);
+                        all_devices.push((alsa_name, true, false));
+                    }
+                }
+            }
+        }
+        
+        // Parse aplay -l for output devices
+        if let Ok(out) = std::process::Command::new("aplay").arg("-l").output() {
+            if let Ok(text) = String::from_utf8(out.stdout) {
+                for alsa_name in parse_alsa_card_list(&text) {
+                    // Check if we already have this device (maybe added from arecord)
+                    if let Some(entry) = all_devices.iter_mut().find(|(n, _, _)| n == &alsa_name) {
+                        entry.2 = true; // Mark as also having output
+                    } else {
+                        log::info!("[AUDIO] Adding ALSA output device missing from cpal: {}", alsa_name);
+                        all_devices.push((alsa_name, false, true));
+                    }
+                }
+            }
+        }
+    }
+
     all_devices.sort_by(|a, b| a.0.cmp(&b.0));
     
     // For duplicate names, label them with capabilities to help the user
