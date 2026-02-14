@@ -351,6 +351,13 @@ async fn run_runtime(
                         if let Some(h) = &hamlib { h.set_ptt(true); }
                         if !tx_active { tx_active = true; let _ = evt_tx.send(UiEvent::TxActive(true)); }
 
+                        // 🟢 LINUX FIX: Stop RX before TX so ALSA device is free for output
+                        if let Some(st) = rx_stop_tx.take() {
+                            let _ = st.send(());
+                            // Give ALSA time to fully release the device handle
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+
                         if let Some(payload) = qso_engine.next_tx() {
                             let mut final_payload = payload;
 

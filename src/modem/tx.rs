@@ -232,48 +232,11 @@ fn build_output_and_sender(cfg: &TxAudioCfg) -> Result<(AudioOutput, mpsc::Unbou
     let device = if let Some(ref name) = cfg.output_device {
         log::info!("[TX] Opening output device: '{}'", name);
         find_nth_output_device(name).unwrap_or_else(|| {
-            // Fallback: try base name (without suffix) then full display name
             let (base, _) = parse_device_suffix(name);
             log::warn!("[TX] find_nth_output_device failed, trying DeviceManager with base='{}' then full='{}'", base, name);
             manager.get_output_device(Some(&base))
                 .or_else(|_| manager.get_output_device(Some(name)))
                 .or_else(|_| {
-                    // 🟢 LINUX: Try opening the ALSA device from the INPUT device list
-                    // On some ALSA backends, USB CODECs only appear in input enumeration
-                    // but can still be opened for output
-                    #[cfg(target_os = "linux")]
-                    {
-                        use cpal::traits::{HostTrait, DeviceTrait};
-                        let host = cpal::default_host();
-                        if base.starts_with("hw:") || base.starts_with("plughw:") {
-                            log::info!("[TX] Trying to find ALSA device '{}' in input_devices() for output use", base);
-                            if let Ok(devs) = host.input_devices() {
-                                for dev in devs {
-                                    if let Ok(n) = dev.name() {
-                                        if n == base {
-                                            log::info!("[TX] Found '{}' in input_devices() — using for output (ALSA allows this)", n);
-                                            return Ok(dev);
-                                        }
-                                    }
-                                }
-                            }
-                            // Also try plughw: variant of hw: device
-                            if base.starts_with("hw:") {
-                                let plughw = format!("plughw:{}", &base[3..]);
-                                log::info!("[TX] Trying plughw: variant '{}' in input_devices()", plughw);
-                                if let Ok(devs) = host.input_devices() {
-                                    for dev in devs {
-                                        if let Ok(n) = dev.name() {
-                                            if n == plughw {
-                                                log::info!("[TX] Found '{}' in input_devices() — using for output", n);
-                                                return Ok(dev);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                     log::warn!("[TX] All device lookups failed, using system default output");
                     manager.default_output_device()
                 })
@@ -384,6 +347,8 @@ fn message_from_short_format2(s: &str, my_call: &str, their_call: &str) -> Resul
 }
 
 /// Resolve a display name like "USB Audio CODEC (TX)" to the correct cpal output device.
+/// On Linux/ALSA, USB CODECs may only appear in input_devices() enumeration.
+/// We search output → all → input devices, since ALSA device handles work for both directions.
 fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let (base_name, suffix) = parse_device_suffix(display_name);
@@ -391,139 +356,85 @@ fn find_nth_output_device(display_name: &str) -> Option<cpal::Device> {
     
     log::info!("[TX] Resolving output device: '{}' (base='{}', suffix='{}')", display_name, base_name, suffix);
     
-    // Strategy 1: Try output_devices() first — most reliable on all platforms for TX
+    // 1. Try output_devices() — standard path, works on Windows/macOS
     if let Ok(devs) = host.output_devices() {
         for dev in devs {
             if let Ok(name) = dev.name() {
-                if name == base_name || name == display_name {
-                    log::info!("[TX] Found output device via output_devices(): '{}'", name);
+                if name == display_name || name == base_name {
+                    log::info!("[TX] Found in output_devices(): '{}'", name);
+                    return Some(dev);
+                }
+            }
+        }
+    }
+
+    // 2. Try host.devices() — duplex devices (macOS CoreAudio path)
+    if let Ok(devs) = host.devices() {
+        let dev_list: Vec<cpal::Device> = devs.collect();
+        match suffix.as_str() {
+            "TX" | "RX/TX" => {
+                let mut fallback: Option<cpal::Device> = None;
+                for dev in dev_list {
+                    if let Ok(name) = dev.name() {
+                        if name == base_name {
+                            let has_out = dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                                || dev.default_output_config().is_ok();
+                            if has_out { 
+                                log::info!("[TX] Found TX device via capability detection: '{}'", name);
+                                return Some(dev); 
+                            }
+                            let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
+                                || dev.default_input_config().is_ok();
+                            if !has_in && fallback.is_none() { fallback = Some(dev); }
+                        }
+                    }
+                }
+                if let Some(fb) = fallback { 
+                    log::info!("[TX] Using inferred TX device (not-input fallback)");
+                    return Some(fb); 
+                }
+            }
+            "" => {
+                // No suffix — match by name in all devices
+                for dev in dev_list {
+                    if let Ok(name) = dev.name() {
+                        if name == base_name || name == display_name {
+                            log::info!("[TX] Found in host.devices(): '{}'", name);
+                            return Some(dev);
+                        }
+                    }
+                }
+            }
+            _ => {
+                let occurrence: usize = suffix.parse().unwrap_or(1);
+                let mut count = 0usize;
+                for dev in dev_list {
+                    if let Ok(name) = dev.name() {
+                        if name == base_name {
+                            count += 1;
+                            if count == occurrence { return Some(dev); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 🟢 LINUX FIX: Check input_devices() too!
+    // ALSA USB CODECs often only appear in input enumeration but the underlying
+    // device handle works for both input and output (same hardware PCM).
+    if let Ok(devs) = host.input_devices() {
+        for dev in devs {
+            if let Ok(name) = dev.name() {
+                if name == display_name || name == base_name {
+                    log::warn!("[TX] Found '{}' in INPUT list — using for OUTPUT (Linux ALSA workaround)", name);
                     return Some(dev);
                 }
             }
         }
     }
     
-    log::info!("[TX] Not found in output_devices(), trying host.devices()...");
-    
-    // Strategy 2: Try host.devices() with capability detection (macOS path)
-    if let Ok(devs) = host.devices() {
-        let dev_list: Vec<cpal::Device> = devs.collect();
-        if !dev_list.is_empty() {
-            match suffix.as_str() {
-                "TX" | "RX/TX" => {
-                    let mut fallback: Option<cpal::Device> = None;
-                    for dev in dev_list {
-                        if let Ok(name) = dev.name() {
-                            if name == base_name {
-                                let has_out = dev.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
-                                    || dev.default_output_config().is_ok();
-                                if has_out { 
-                                    log::info!("[TX] Found TX device via capability detection: '{}'", name);
-                                    return Some(dev); 
-                                }
-                                let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
-                                    || dev.default_input_config().is_ok();
-                                if !has_in && fallback.is_none() { fallback = Some(dev); }
-                            }
-                        }
-                    }
-                    if let Some(fb) = fallback { 
-                        log::info!("[TX] Using inferred TX device (not-input fallback)");
-                        return Some(fb); 
-                    }
-                }
-                "RX" => {
-                    for dev in dev_list {
-                        if let Ok(name) = dev.name() {
-                            if name == base_name {
-                                let has_in = dev.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
-                                    || dev.default_input_config().is_ok();
-                                if has_in { return Some(dev); }
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    let occurrence: usize = suffix.parse().unwrap_or(1);
-                    let mut count = 0usize;
-                    for dev in dev_list {
-                        if let Ok(name) = dev.name() {
-                            if name == base_name {
-                                count += 1;
-                                if count == occurrence { return Some(dev); }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    log::warn!("[TX] Could not resolve output device '{}' via standard lookups", display_name);
-    
-    // Strategy 3: On ALSA, hw: devices may not appear in output_devices() enumeration
-    // but can still be opened for output. Find by name in all devices.
-    if base_name.starts_with("hw:") || base_name.starts_with("plughw:") {
-        log::info!("[TX] Trying direct ALSA device lookup for '{}'", base_name);
-        if let Ok(devs) = host.devices() {
-            for dev in devs {
-                if let Ok(name) = dev.name() {
-                    if name == base_name {
-                        log::info!("[TX] Found ALSA device by name: '{}' — attempting to use for output", name);
-                        return Some(dev);
-                    }
-                }
-            }
-        }
-    }
-    
-    // Strategy 4: If hw: device not found, try plughw: equivalent
-    // plughw: handles format conversion and may allow concurrent access with RX
-    if base_name.starts_with("hw:") {
-        let plughw_name = format!("plughw:{}", &base_name[3..]);
-        log::info!("[TX] Trying plughw: equivalent: '{}'", plughw_name);
-        
-        // Try output_devices() first
-        if let Ok(devs) = host.output_devices() {
-            for dev in devs {
-                if let Ok(name) = dev.name() {
-                    if name == plughw_name {
-                        log::info!("[TX] Found plughw: output device: '{}'", name);
-                        return Some(dev);
-                    }
-                }
-            }
-        }
-        // Try all devices
-        if let Ok(devs) = host.devices() {
-            for dev in devs {
-                if let Ok(name) = dev.name() {
-                    if name == plughw_name {
-                        log::info!("[TX] Found plughw: device by name: '{}'", name);
-                        return Some(dev);
-                    }
-                }
-            }
-        }
-    }
-    
-    // Strategy 5: If plughw: was requested but not found, try hw: equivalent
-    if base_name.starts_with("plughw:") {
-        let hw_name = format!("hw:{}", &base_name[7..]);
-        log::info!("[TX] Trying hw: equivalent: '{}'", hw_name);
-        if let Ok(devs) = host.devices() {
-            for dev in devs {
-                if let Ok(name) = dev.name() {
-                    if name == hw_name {
-                        log::info!("[TX] Found hw: device by name: '{}'", name);
-                        return Some(dev);
-                    }
-                }
-            }
-        }
-    }
-    
-    log::warn!("[TX] Could not resolve output device '{}'", display_name);
+    log::error!("[TX] CRITICAL: Device '{}' not found in ANY list. Falling back to System Default.", display_name);
     None
 }
 
