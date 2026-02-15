@@ -17,6 +17,120 @@ use crate::modem::{run_transmitter_task, RxAudioCfg, RxConfigUpdate, RxDecoded, 
 use crate::proto::{self, render_payload, Format, RxEnvelope};
 use crate::qso::{Action, EngineEvent, Intent, QsoEngine, QsoState};
 
+/// Detect whether this platform needs audio device switching between RX and TX.
+/// On Linux with raw ALSA (no PipeWire/PulseAudio), a single USB codec can only
+/// be opened for input OR output, not both simultaneously. On macOS, Windows,
+/// and Linux with PipeWire/PulseAudio, both streams can coexist.
+fn detect_needs_audio_switching() -> bool {
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS and Windows: never need audio switching
+        log::info!("[AUDIO] Platform: not Linux — full duplex audio, no device switching needed");
+        false
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Check for PipeWire first (modern Ubuntu 22.04+ default)
+        if let Ok(output) = Command::new("pidof").arg("pipewire").output() {
+            if output.status.success() && !output.stdout.is_empty() {
+                log::info!("[AUDIO] Platform: Linux with PipeWire — full duplex audio, no device switching needed");
+                return false;
+            }
+        }
+        // Check for PulseAudio
+        if let Ok(output) = Command::new("pidof").arg("pulseaudio").output() {
+            if output.status.success() && !output.stdout.is_empty() {
+                log::info!("[AUDIO] Platform: Linux with PulseAudio — full duplex audio, no device switching needed");
+                return false;
+            }
+        }
+        // Raw ALSA only — need to switch device between RX and TX
+        log::info!("[AUDIO] Platform: Linux with raw ALSA — single codec requires device switching between RX/TX");
+        true
+    }
+}
+
+/// On Linux with PipeWire/PulseAudio, remap a hardware ALSA device name to "pulse"
+/// and set the PulseAudio/PipeWire default sink/source to the matching physical device.
+/// On macOS/Windows, returns the device name unchanged.
+#[cfg(target_os = "linux")]
+fn linux_remap_audio_device(device: &Option<String>, is_output: bool) -> Option<String> {
+    let dev = match device {
+        Some(d) => d.clone(),
+        None => return None,
+    };
+
+    // If already "pulse" or "pipewire" or "default", no remapping needed
+    if dev == "pulse" || dev == "pipewire" || dev == "default" {
+        return Some(dev);
+    }
+
+    // Extract card name from ALSA device strings like "plughw:CARD=CODEC,DEV=0" or "hw:CARD=CODEC,DEV=0"
+    let card_name = if let Some(pos) = dev.find("CARD=") {
+        let after = &dev[pos + 5..];
+        match after.find(',') {
+            Some(comma) => after[..comma].to_string(),
+            None => after.to_string(),
+        }
+    } else {
+        log::info!("[AUDIO] Linux: no CARD= in device '{}', passing through unchanged", dev);
+        return Some(dev);
+    };
+
+    log::info!("[AUDIO] Linux: extracted card name '{}' from '{}'", card_name, dev);
+
+    // Query PulseAudio for matching sink/source
+    let (pactl_cmd, set_default_cmd) = if is_output {
+        ("sinks", "set-default-sink")
+    } else {
+        ("sources", "set-default-source")
+    };
+
+    if let Ok(output) = Command::new("pactl").args(["list", "short", pactl_cmd]).output() {
+        if output.status.success() {
+            let listing = String::from_utf8_lossy(&output.stdout);
+            // Find a line containing the card name (case-insensitive match)
+            let card_lower = card_name.to_lowercase();
+            for line in listing.lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() >= 2 {
+                    let pa_name = parts[1];
+                    if pa_name.to_lowercase().contains(&card_lower) {
+                        // Skip monitor sources (they're loopback, not real inputs)
+                        if !is_output && pa_name.contains(".monitor") {
+                            continue;
+                        }
+                        log::info!("[AUDIO] Linux: matched '{}' → PulseAudio device '{}'", card_name, pa_name);
+                        
+                        // Set as default
+                        if let Ok(result) = Command::new("pactl").args([set_default_cmd, pa_name]).output() {
+                            if result.status.success() {
+                                log::info!("[AUDIO] Linux: set default {} to '{}'", pactl_cmd, pa_name);
+                            } else {
+                                log::warn!("[AUDIO] Linux: failed to set default {} to '{}'", pactl_cmd, pa_name);
+                            }
+                        }
+                        
+                        // Return "pulse" so CPAL routes through PulseAudio to this device
+                        return Some("pulse".to_string());
+                    }
+                }
+            }
+            log::warn!("[AUDIO] Linux: no PulseAudio {} matching card '{}', using original device", pactl_cmd, card_name);
+        }
+    } else {
+        log::warn!("[AUDIO] Linux: pactl not found, using original device");
+    }
+
+    // Fallback: use the original device name
+    Some(dev)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_remap_audio_device(device: &Option<String>, _is_output: bool) -> Option<String> {
+    device.clone()
+}
+
 pub fn start() -> EngineHandle {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let (cmds, cmd_rx) = mpsc::unbounded_channel::<UiCmd>();
@@ -195,6 +309,11 @@ async fn run_runtime(
 
     let mut input_device: Option<String> = saved_cfg.input_device.clone();
     let mut output_device: Option<String> = saved_cfg.output_device.clone();
+    
+    // On Linux with PipeWire/PulseAudio: remap hardware devices to "pulse" and set defaults
+    // On macOS/Windows: these are identical to input_device/output_device
+    let mut effective_input_device: Option<String> = linux_remap_audio_device(&input_device, false);
+    let mut effective_output_device: Option<String> = linux_remap_audio_device(&output_device, true);
     let mut current_rig_model: String = saved_cfg.rig_model.clone();
     let mut current_rig_port: String = saved_cfg.rig_port.clone();
     let mut current_rig_baud: String = saved_cfg.rig_baud.clone();
@@ -229,13 +348,16 @@ async fn run_runtime(
     let mut launched_serial_port: String = String::new();
     let mut launched_baud_rate: u32 = 0;
 
+    // Detect whether we need to pause/resume audio between RX and TX
+    let needs_audio_switching = detect_needs_audio_switching();
+
 
     // 🟢 AUTO-START: If valid config exists, start LISTENING immediately.
     if !qso_engine.my_call.is_empty() && input_device.is_some() {
         log::info!("⚡ Auto-starting RX with saved configuration...");
 
         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
-            output_device: output_device.clone(),
+            output_device: effective_output_device.clone(),
             output_level,
             sample_rate,
             buffer_size,
@@ -313,7 +435,7 @@ async fn run_runtime(
                 }
 
                 // 🟢 Poll rig frequency every ~5 seconds
-                if diag_tick % 20 == 0 {
+                if diag_tick % 100 == 0 {
                     if let Some(h) = &hamlib { h.refresh(); }
                 }
 
@@ -339,7 +461,7 @@ async fn run_runtime(
 
                 if rx_needs_restart && !qso_engine.my_call.is_empty() {
                     restart_rx(&rx_decoded_tx, &mut rx_stop_tx, &mut rx_config_tx, RxAudioCfg {
-                        input_device: input_device.clone(),
+                        input_device: effective_input_device.clone(),
                         sample_rate,
                         buffer_size,
                         slot_len_ms: slen as u32,
@@ -357,19 +479,27 @@ async fn run_runtime(
                     last_slot_index = Some(sidx);
 
                     if should_tx {
-                        // RX→TX: PauseAudio will drain remaining audio and run accumulation
+                        // RX→TX transition
                         if let Some(h) = &hamlib { h.set_ptt(true); }
                         if !tx_active { 
                             tx_active = true; 
                             let _ = evt_tx.send(UiEvent::TxActive(true)); 
-                            log::info!("⏱️ RX→TX: pausing audio, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
+                            log::info!("⏱️ RX→TX: sidx={} parity={} state={} audio_switching={}", sidx, slot, qso_engine.state, needs_audio_switching);
                         }
 
-                        // 🟢 LINUX FIX: Pause audio capture (not the RX task) so ALSA device is free for output
-                        // PauseAudio also triggers accumulation processing using the correct rx_slot
-                        update_rx_config(&rx_config_tx, RxConfigUpdate::PauseAudio);
-                        // Give ALSA time to fully release the device handle
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if needs_audio_switching {
+                            // Raw ALSA: must release input device before TX can open output
+                            // PauseAudio also drains remaining audio and runs accumulation
+                            update_rx_config(&rx_config_tx, RxConfigUpdate::PauseAudio);
+                            // Give ALSA time to fully release the device handle
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        } else {
+                            // PipeWire/PulseAudio/macOS/Windows: both streams coexist
+                            // Just trigger accumulation processing via EndOfPeriod
+                            if let Some(tx) = &rx_config_tx {
+                                let _ = tx.send(RxConfigUpdate::EndOfPeriod);
+                            }
+                        }
 
                         if let Some(payload) = qso_engine.next_tx() {
                             let mut final_payload = payload;
@@ -458,14 +588,17 @@ async fn run_runtime(
                         else {
                         // RX slot boundary
                         if tx_active {
-                            // TX→RX transition: release PTT and resume audio capture
+                            // TX→RX transition: release PTT
                             if let Some(h) = &hamlib { h.set_ptt(false); }
                             tx_active = false;
                             let _ = evt_tx.send(UiEvent::TxActive(false));
-                            log::info!("⏱️ TX→RX: resuming audio, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
+                            log::info!("⏱️ TX→RX: sidx={} parity={} state={} audio_switching={}", sidx, slot, qso_engine.state, needs_audio_switching);
                             
-                            // Resume audio capture on the RX task
-                            update_rx_config(&rx_config_tx, RxConfigUpdate::ResumeAudio);
+                            if needs_audio_switching {
+                                // Raw ALSA: need to restart audio input after TX released the device
+                                update_rx_config(&rx_config_tx, RxConfigUpdate::ResumeAudio);
+                            }
+                            // PipeWire/PulseAudio/macOS/Windows: audio input never stopped, nothing to resume
                         } else {
                             // RX→RX transition: process accumulation from previous RX period
                             log::info!("⏱️ RX→RX: EndOfPeriod, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
@@ -479,8 +612,14 @@ async fn run_runtime(
 
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
-                    UiCmd::SetInputDevice(dev) => { input_device = dev; }
-                    UiCmd::SetOutputDevice(dev) => { output_device = dev; }
+                    UiCmd::SetInputDevice(dev) => { 
+                        input_device = dev; 
+                        effective_input_device = linux_remap_audio_device(&input_device, false);
+                    }
+                    UiCmd::SetOutputDevice(dev) => { 
+                        output_device = dev; 
+                        effective_output_device = linux_remap_audio_device(&output_device, true);
+                    }
                     UiCmd::SetSlotPeriod(p) => { 
                         slot_period = p; 
                         last_slot_index = None;
@@ -610,7 +749,7 @@ async fn run_runtime(
                     }
                     UiCmd::ApplyAudio => {
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
-                            output_device: output_device.clone(),
+                            output_device: effective_output_device.clone(),
                             output_level,
                             sample_rate,
                             buffer_size,
@@ -664,7 +803,7 @@ async fn run_runtime(
                         
                         // 🟢 CRITICAL FIX: Initialize audio output
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
-                            output_device: output_device.clone(),
+                            output_device: effective_output_device.clone(),
                             output_level,
                             sample_rate,
                             buffer_size,
@@ -692,7 +831,7 @@ async fn run_runtime(
                         
                         // 🟢 CRITICAL FIX: Initialize TX audio output!
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
-                            output_device: output_device.clone(),
+                            output_device: effective_output_device.clone(),
                             output_level,
                             sample_rate,
                             buffer_size,
@@ -718,7 +857,7 @@ async fn run_runtime(
                         
                         // 🟢 CRITICAL FIX: Initialize TX audio output!
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
-                            output_device: output_device.clone(),
+                            output_device: effective_output_device.clone(),
                             output_level,
                             sample_rate,
                             buffer_size,
@@ -743,7 +882,7 @@ async fn run_runtime(
                         observed_remote_slot = None;
                         was_calling_cq = false;
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
-                            output_device: output_device.clone(),
+                            output_device: effective_output_device.clone(),
                             output_level,
                             sample_rate,
                             buffer_size,
@@ -778,7 +917,7 @@ async fn run_runtime(
                         last_slot_index = None;
                         was_calling_cq = false;
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
-                            output_device: output_device.clone(),
+                            output_device: effective_output_device.clone(),
                             output_level,
                             sample_rate,
                             buffer_size,
