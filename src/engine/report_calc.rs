@@ -1,6 +1,6 @@
 // src/engine/report_calc.rs
 use std::time::{SystemTime, UNIX_EPOCH};
-
+#[allow(dead_code)]
 /// Calculate signal reports based on decode quality (correlation)
 /// Maps correlation to report codes: 26, 27, 28, 29, 36, 37
 pub struct ReportCalculator {
@@ -31,6 +31,7 @@ impl Default for ReportCalculator {
     }
 }
 
+#[allow(dead_code)]
 impl ReportCalculator {
     pub fn new() -> Self {
         Self::default()

@@ -1,11 +1,9 @@
 // src/modem/mod.rs
-
+#[allow(dead_code)]
 pub mod audio_ring;
 pub mod rx;
 pub mod sync_tracker;  // kept for reference but no longer used in the RX path
 pub mod tx;
-
-pub use audio_ring::AudioRing;
 pub use rx::{run_receiver, RxAudioCfg, RxConfigUpdate, RxDecoded};
 pub use tx::run_transmitter_task;
 
@@ -16,6 +14,7 @@ pub use tx::run_transmitter_task;
 /// TX never blocks RX processing.
 /// RX capture may pause, but decode continues until buffer drains.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum TxRequest {
     ApplyAudio {
         output_device: Option<String>,

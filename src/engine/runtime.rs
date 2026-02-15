@@ -5,9 +5,8 @@ use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-use crate::engine::hamlib::{HamlibClient, HamlibUpdate};
+use crate::engine::hamlib::HamlibClient;
 use std::process::{Command, Child};
-use std::path::PathBuf;
 
 use msk2k_dsp::callsign::CallsignCodec;
 // 🟢 Import Rendered enum
@@ -314,7 +313,7 @@ async fn run_runtime(
                 }
 
                 // 🟢 Poll rig frequency every ~5 seconds
-                if diag_tick % 100 == 0 {
+                if diag_tick % 20 == 0 {
                     if let Some(h) = &hamlib { h.refresh(); }
                 }
 
@@ -358,11 +357,7 @@ async fn run_runtime(
                     last_slot_index = Some(sidx);
 
                     if should_tx {
-                        // End of RX period: tell receiver to process accumulation
-                        if let Some(tx) = &rx_config_tx {
-                            let _ = tx.send(RxConfigUpdate::EndOfPeriod);
-                        }
-
+                        // RX→TX: PauseAudio will drain remaining audio and run accumulation
                         if let Some(h) = &hamlib { h.set_ptt(true); }
                         if !tx_active { 
                             tx_active = true; 
@@ -371,6 +366,7 @@ async fn run_runtime(
                         }
 
                         // 🟢 LINUX FIX: Pause audio capture (not the RX task) so ALSA device is free for output
+                        // PauseAudio also triggers accumulation processing using the correct rx_slot
                         update_rx_config(&rx_config_tx, RxConfigUpdate::PauseAudio);
                         // Give ALSA time to fully release the device handle
                         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -515,10 +511,10 @@ async fn run_runtime(
 
                     // 2. Configure Launcher
                     UiCmd::ConfigureLauncher { enable_launcher, rig_model, serial_port, baud_rate } => {
-                        // Track rig settings for config save
-                        current_rig_model = rig_model.clone();
-                        current_rig_port = serial_port.clone();
-                        current_rig_baud = baud_rate.to_string();
+                        // Track rig settings for config save (don't overwrite with empty/zero values)
+                        if !rig_model.is_empty() { current_rig_model = rig_model.clone(); }
+                        if !serial_port.is_empty() { current_rig_port = serial_port.clone(); }
+                        if baud_rate > 0 { current_rig_baud = baud_rate.to_string(); }
 
                         // Check if same config is already running (skip re-launch)
                         let mut skip_launch = false;
@@ -991,7 +987,7 @@ fn update_rx_config(
 fn process_qso_events(
     events: &[EngineEvent],
     evt_tx: &mpsc::UnboundedSender<UiEvent>,
-    rx_config_tx: &Option<mpsc::UnboundedSender<RxConfigUpdate>>,
+    _rx_config_tx: &Option<mpsc::UnboundedSender<RxConfigUpdate>>,
 ) {
     for event in events {
         match event {

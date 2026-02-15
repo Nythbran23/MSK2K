@@ -15,6 +15,7 @@ pub fn start_engine() -> EngineHandle {
 }
 
 // Back-compat: your current file calls runtime::start() already.
+#[allow(dead_code)]
 pub fn start() -> EngineHandle {
     runtime::start()
 }

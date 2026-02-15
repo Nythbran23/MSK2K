@@ -7,7 +7,7 @@
 //! 4. **Outputs packet soft bits directly** - no need to re-demodulate
 //!
 //! Reference: "The PSK2k V5 Codes" by Klaus von der Heide, DJ5HG
-
+#![allow(dead_code)]
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::time::{SystemTime, UNIX_EPOCH};

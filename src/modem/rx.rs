@@ -1,6 +1,6 @@
 // src/modem/rx.rs
 
-use log::{debug, info};
+use log;
 use tokio::sync::mpsc;
 use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,7 +40,7 @@ pub enum RxConfigUpdate {
     PauseAudio,   // Stop audio capture (for ALSA device sharing) but keep task alive
     ResumeAudio,  // Restart audio capture after TX
 }
-
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RxDecoded {
     pub msg: Message,
@@ -105,8 +105,8 @@ pub async fn run_receiver(
     let mut accumulator = Accumulator::new(&cfg.my_call, cfg.their_call.clone());
     let mut max_retain_samples = (cfg.sample_rate as u64 * (cfg.slot_len_ms as u64 + 1000) / 1000) as usize;
     let mut retained_audio: Vec<f32> = Vec::with_capacity(max_retain_samples);
-    let mut pending_accumulation = false;
     let mut audio_paused = false;
+    let mut last_audio_rx_slot: u8 = 0; // Slot parity when audio was last captured
     
     // 🔍 DIAGNOSTIC: Audio level monitoring
     let mut diag_sample_count: u64 = 0;
@@ -136,7 +136,7 @@ pub async fn run_receiver(
                         }
                     },
                     RxConfigUpdate::EndOfPeriod => {
-                        // Drain any remaining audio chunks into the accumulator
+                        // RX→RX boundary: drain remaining audio, process accumulation
                         while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
                             for s in &mut chunk { *s *= 0.5; }
                             retained_audio.extend_from_slice(&chunk);
@@ -151,29 +151,57 @@ pub async fn run_receiver(
                         demod = PhaseDemodState::new();
                         extractor = MatrixSyncExtractor::new();
 
-                        // Process accumulation immediately - don't wait for next audio chunk
                         let candidate_count = accumulator.candidate_count();
-                        log::info!("[ACCUM] EndOfPeriod: {} candidates to process", candidate_count);
+                        log::info!("[ACCUM] EndOfPeriod (RX→RX): {} candidates, rx_slot={}", candidate_count, last_audio_rx_slot);
 
                         let utc_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-                        let period_ms = cfg.slot_len_ms as u64;
-                        let current_rx_slot = ((utc_ms as u64 / period_ms) % 2) as u8;
 
                         if let Some(msg) = accumulator.process() {
-                            log::info!("[ACCUM] ✅ Accumulated decode: '{}'", msg.text);
+                            log::info!("[ACCUM] ✅ Accumulated decode: '{}' rx_slot={}", msg.text, last_audio_rx_slot);
                             let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
-                            let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: current_rx_slot, is_private, is_accumulated: true };
+                            let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: last_audio_rx_slot, is_private, is_accumulated: true };
                             let _ = decoded_tx.send(decoded);
                         }
                         accumulator.clear();
                         retained_audio.clear();
-                        pending_accumulation = false;
                     },
                     RxConfigUpdate::PauseAudio => {
                         if !audio_paused {
-                            log::info!("[RX] Audio paused (ALSA device release for TX)");
+                            // Audio is stopping — this is the definitive end of the RX period.
+                            // All audio in the accumulator was received during last_audio_rx_slot.
                             audio_input.stop();
                             audio_paused = true;
+
+                            // Drain any final buffered audio chunks
+                            while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
+                                for s in &mut chunk { *s *= 0.5; }
+                                retained_audio.extend_from_slice(&chunk);
+                                let phases = demod.push_audio(&chunk);
+                                if !phases.is_empty() {
+                                    let candidates = extractor.push_phase(&phases);
+                                    for candidate in candidates { 
+                                        accumulator.add(candidate);
+                                    }
+                                }
+                            }
+                            demod = PhaseDemodState::new();
+                            extractor = MatrixSyncExtractor::new();
+
+                            let candidate_count = accumulator.candidate_count();
+                            log::info!("[ACCUM] PauseAudio: {} candidates, rx_slot={}", candidate_count, last_audio_rx_slot);
+
+                            let utc_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+
+                            if let Some(msg) = accumulator.process() {
+                                log::info!("[ACCUM] ✅ Accumulated decode: '{}' rx_slot={}", msg.text, last_audio_rx_slot);
+                                let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
+                                let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: last_audio_rx_slot, is_private, is_accumulated: true };
+                                let _ = decoded_tx.send(decoded);
+                            }
+                            accumulator.clear();
+                            retained_audio.clear();
+
+                            log::info!("[RX] Audio paused (ALSA device release for TX)");
                         }
                     },
                     RxConfigUpdate::ResumeAudio => {
@@ -197,7 +225,9 @@ pub async fn run_receiver(
                         let now = SystemTime::now();
                         let utc_ms = now.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
                         let period_ms = cfg.slot_len_ms as u64;
-                        let current_rx_slot = ((utc_ms as u64 / period_ms) % 2) as u8;
+                        
+                        // Record the slot parity while audio is flowing — this is ground truth
+                        last_audio_rx_slot = ((utc_ms as u64 / period_ms) % 2) as u8;
 
                         // 🔍 DIAGNOSTIC: Measure audio levels BEFORE any processing
                         for s in &chunk {
@@ -242,7 +272,7 @@ pub async fn run_receiver(
                                 accumulator.add(candidate.clone());
                                 
                                 // Also try live decode for immediate feedback
-                                if let Some(decoded) = decode_candidate(candidate, &cfg, utc_ms, current_rx_slot) {
+                                if let Some(decoded) = decode_candidate(candidate, &cfg, utc_ms, last_audio_rx_slot) {
                                     diag_decode_count += 1; // 🔍 DIAGNOSTIC
                                     log::info!("[LIVE]  ✅ '{}'", decoded.msg.text);
                                     let _ = decoded_tx.send(decoded);

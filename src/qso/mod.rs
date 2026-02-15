@@ -87,6 +87,7 @@ pub enum Intent {
 
 /// Events emitted by the engine
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum EngineEvent {
     StateChanged(QsoState),
     Rx(RxEnvelope),
@@ -122,6 +123,7 @@ pub struct QsoEngine {
     pub band: String,
 }
 
+#[allow(dead_code)]
 impl QsoEngine {
     pub fn new(my_call: String) -> Self {
         Self {

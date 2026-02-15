@@ -82,7 +82,7 @@ pub async fn run_transmitter_task(
             }
 
             // 🟢 GRID MODE: Raw bits from runtime (already 71 bits)
-            TxRequest::RawBits { bits, slot_len_ms, my_call, their_call } => {
+            TxRequest::RawBits { bits, slot_len_ms, my_call, their_call: _ } => {
                 let (out_stream, audio_tx) = match build_output_and_sender(&cfg) {
                     Ok(res) => res,
                     Err(e) => {
@@ -275,7 +275,7 @@ fn message_from_rendered(rendered: &str) -> Result<Message> {
     }
 }
 
-fn vec_to_array<const N: usize>(v: Vec<i32>, what: &str) -> Result<[i32; N]> {
+fn vec_to_array<const N: usize>(v: Vec<i32>, _what: &str) -> Result<[i32; N]> {
     if v.len() < N { 
         let mut padded = v; 
         while padded.len() < N { padded.push(0); }

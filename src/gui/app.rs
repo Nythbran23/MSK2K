@@ -1,5 +1,4 @@
 // src/gui/app.rs
-use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui;
 use std::collections::HashMap;
 use std::process::Command;
@@ -22,7 +21,8 @@ pub fn run_gui() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 600.0])
-            .with_min_inner_size([500.0, 250.0]),
+            .with_min_inner_size([500.0, 250.0])
+            .with_icon(icon),
         ..Default::default()
     };
     let engine = crate::engine::start_engine();
@@ -45,6 +45,7 @@ struct LogEntry {
     rx_slot: Option<u8>,
 }
 
+#[allow(dead_code)]
 struct Msk2kEguiApp {
     engine: EngineHandle,
     my_call: String,
@@ -545,8 +546,9 @@ impl eframe::App for Msk2kEguiApp {
                             baud_rate: baud,
                         });
                     } else {
+                         let baud = self.rig_baud.parse().unwrap_or(19200);
                          let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
-                            enable_launcher: false, rig_model: String::new(), serial_port: String::new(), baud_rate: 0 
+                            enable_launcher: false, rig_model: self.rig_model.clone(), serial_port: self.rig_port.clone(), baud_rate: baud 
                         });
                     }
 
@@ -595,7 +597,7 @@ impl eframe::App for Msk2kEguiApp {
                 ui.label(egui::RichText::new(&freq_display).monospace().size(16.0).color(egui::Color32::from_rgb(100, 200, 130)));
                 
                 let saved_selection = ui.visuals().selection.bg_fill;
-                let saved_inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
+                let _saved_inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
                 let slate = egui::Color32::from_rgb(70, 90, 110);
                 ui.visuals_mut().selection.bg_fill = slate;
                 ui.visuals_mut().widgets.inactive.weak_bg_fill = slate;
@@ -931,6 +933,7 @@ fn extract_callsign_and_grid(text: &str) -> Option<(String, Option<String>)> {
     None
 }
 
+#[allow(dead_code)]
 fn extract_callsign(text: &str) -> Option<String> {
     extract_callsign_and_grid(text).map(|(call, _)| call)
 }

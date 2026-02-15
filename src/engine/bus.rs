@@ -2,8 +2,6 @@
 
 // 🟢 FIX: Import QsoRecord from the correct location
 use crate::qso::adif::QsoRecord;
-// RxEnvelope might still be needed depending on other files, keeping it safe
-use crate::proto::RxEnvelope; 
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 
@@ -23,6 +21,7 @@ pub enum SlotParity {
     Even,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum UiCmd {
     SetInputDevice(Option<String>),
@@ -97,6 +96,7 @@ pub enum UiCmd {
     },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     RxText {
