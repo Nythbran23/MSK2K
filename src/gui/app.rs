@@ -28,7 +28,7 @@ pub fn run_gui() -> anyhow::Result<()> {
     let engine = crate::engine::start_engine();
 
     if let Err(e) = eframe::run_native(
-        "MSK2K",
+        &format!("MSK2K v{}", env!("CARGO_PKG_VERSION")),
         options,
         Box::new(|_cc| Ok(Box::new(Msk2kEguiApp::new(engine)))),
     ) {
