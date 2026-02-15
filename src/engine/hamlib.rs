@@ -4,8 +4,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use std::time::Duration;
-use log::{info, error, warn, debug};
-
+use log::{info, error, debug};
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum HamlibCmd {
     Ptt(bool),
@@ -14,6 +14,7 @@ pub enum HamlibCmd {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HamlibUpdate {
     pub freq: Option<u64>,
     pub mode: Option<String>,

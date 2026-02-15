@@ -4,7 +4,7 @@
 //! around detected sync peaks for decode.
 
 use std::collections::VecDeque;
-
+#[allow(dead_code)]
 /// Ring buffer for raw audio samples.
 ///
 /// Supports efficient push and extraction of slices around specified positions.

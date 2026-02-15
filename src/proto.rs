@@ -5,7 +5,7 @@
 // separate from the DSP encoding details.
 
 use msk2k_dsp::message::Message;
-
+#[allow(dead_code)]
 /// Message format (maps to PSK2K Format-1 or Format-2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -23,6 +23,7 @@ pub enum Rendered {
 
 /// Logical payload types for QSO protocol.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum Payload {
     /// CQ call (Format-1, general address)
     Cq {
@@ -83,7 +84,7 @@ pub enum Payload {
         text: String,
     },
 }
-
+#[allow(dead_code)]
 impl Payload {
     pub fn from_call(&self) -> &str {
         match self {
@@ -127,7 +128,7 @@ impl Payload {
         }
     }
 }
-
+#[allow(dead_code)]
 /// Envelope for received messages
 #[derive(Debug, Clone)]
 pub struct RxEnvelope {
@@ -139,6 +140,7 @@ pub struct RxEnvelope {
 }
 
 /// Envelope for messages to transmit
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TxEnvelope {
     pub payload: Payload,

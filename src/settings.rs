@@ -130,7 +130,7 @@ impl Default for UiConfig {
         }
     }
 }
-
+#[allow(dead_code)]
 impl Config {
     /// Load configuration from file
     pub fn load(path: &PathBuf) -> anyhow::Result<Self> {
