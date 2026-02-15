@@ -70,6 +70,7 @@ struct AppConfig {
     rig_model: String,
     rig_port: String,
     rig_baud: String,
+    slot_period: SlotPeriod,
 }
 fn config_file_path() -> std::path::PathBuf {
     let mut path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -102,32 +103,44 @@ fn load_config() -> AppConfig {
                     "rig_model" => cfg.rig_model = v.trim().to_string(),
                     "rig_port" => cfg.rig_port = v.trim().to_string(),
                     "rig_baud" => cfg.rig_baud = v.trim().to_string(),
+                    "slot_period" => {
+                        cfg.slot_period = match v.trim() {
+                            "30" => SlotPeriod::S30,
+                            _ => SlotPeriod::S15,
+                        };
+                    }
                     _ => {}
                 }
             }
         }
         log::info!(
-            "📂 Loaded config: Call={}, In={:?}, Out={:?}, Rig={} Port={} Baud={}",
+            "📂 Loaded config: Call={}, In={:?}, Out={:?}, Rig={} Port={} Baud={} Period={:?}",
             cfg.my_call,
             cfg.input_device,
             cfg.output_device,
             cfg.rig_model,
             cfg.rig_port,
-            cfg.rig_baud
+            cfg.rig_baud,
+            cfg.slot_period
         );
     }
     cfg
 }
 
 fn save_config(cfg: &AppConfig) {
+    let period_str = match cfg.slot_period {
+        SlotPeriod::S30 => "30",
+        SlotPeriod::S15 => "15",
+    };
     let data = format!(
-        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\n",
+        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\nslot_period={}\n",
         cfg.my_call,
         cfg.input_device.as_deref().unwrap_or(""),
         cfg.output_device.as_deref().unwrap_or(""),
         cfg.rig_model,
         cfg.rig_port,
-        cfg.rig_baud
+        cfg.rig_baud,
+        period_str
     );
     if let Err(e) = fs::write(config_file_path(), data) {
         log::warn!("Failed to save config: {}", e);
@@ -178,6 +191,7 @@ async fn run_runtime(
         rig_model: saved_cfg.rig_model.clone(),
         rig_port: saved_cfg.rig_port.clone(),
         rig_baud: saved_cfg.rig_baud.clone(),
+        slot_period: saved_cfg.slot_period,
     });
 
     let mut input_device: Option<String> = saved_cfg.input_device.clone();
@@ -196,7 +210,7 @@ async fn run_runtime(
     let mut is_grid_mode = false;
     let mut current_grid_indices: Option<[usize; 4]> = None;
 
-    let mut slot_period = SlotPeriod::S15;
+    let mut slot_period = saved_cfg.slot_period;
     let mut slot_parity_cfg = SlotParity::Odd;
     let mut running = false;
     let mut tx_active = false;
@@ -343,20 +357,23 @@ async fn run_runtime(
                 if last_slot_index.is_none() || sidx != last_slot_index.unwrap() {
                     last_slot_index = Some(sidx);
 
-                    if let Some(tx) = &rx_config_tx {
-                        let _ = tx.send(RxConfigUpdate::EndOfPeriod);
-                    }
-
                     if should_tx {
-                        if let Some(h) = &hamlib { h.set_ptt(true); }
-                        if !tx_active { tx_active = true; let _ = evt_tx.send(UiEvent::TxActive(true)); }
-
-                        // 🟢 LINUX FIX: Stop RX before TX so ALSA device is free for output
-                        if let Some(st) = rx_stop_tx.take() {
-                            let _ = st.send(());
-                            // Give ALSA time to fully release the device handle
-                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        // End of RX period: tell receiver to process accumulation
+                        if let Some(tx) = &rx_config_tx {
+                            let _ = tx.send(RxConfigUpdate::EndOfPeriod);
                         }
+
+                        if let Some(h) = &hamlib { h.set_ptt(true); }
+                        if !tx_active { 
+                            tx_active = true; 
+                            let _ = evt_tx.send(UiEvent::TxActive(true)); 
+                            log::info!("⏱️ RX→TX: pausing audio, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
+                        }
+
+                        // 🟢 LINUX FIX: Pause audio capture (not the RX task) so ALSA device is free for output
+                        update_rx_config(&rx_config_tx, RxConfigUpdate::PauseAudio);
+                        // Give ALSA time to fully release the device handle
+                        std::thread::sleep(std::time::Duration::from_millis(500));
 
                         if let Some(payload) = qso_engine.next_tx() {
                             let mut final_payload = payload;
@@ -430,17 +447,35 @@ async fn run_runtime(
                                         // Keep running for listen mode too
                                         observed_remote_slot = None;
                                     }
+                                    // Free-run receiver: listen on all slots until next QSO locks it
+                                    update_rx_config(&rx_config_tx, RxConfigUpdate::SlotTiming {
+                                        my_tx_slot: 0,
+                                        rx_slot_override: None,
+                                        listen_all_slots: true,
+                                        slot_len_ms: slot_len_ms(slot_period) as u32,
+                                    });
                                     update_rx_config(&rx_config_tx, RxConfigUpdate::TheirCall(None));
                                 }
                             }
                         }
                     }
                         else {
-                        // Only release PTT once when transitioning from TX to RX
+                        // RX slot boundary
                         if tx_active {
+                            // TX→RX transition: release PTT and resume audio capture
                             if let Some(h) = &hamlib { h.set_ptt(false); }
                             tx_active = false;
                             let _ = evt_tx.send(UiEvent::TxActive(false));
+                            log::info!("⏱️ TX→RX: resuming audio, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
+                            
+                            // Resume audio capture on the RX task
+                            update_rx_config(&rx_config_tx, RxConfigUpdate::ResumeAudio);
+                        } else {
+                            // RX→RX transition: process accumulation from previous RX period
+                            log::info!("⏱️ RX→RX: EndOfPeriod, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
+                            if let Some(tx) = &rx_config_tx {
+                                let _ = tx.send(RxConfigUpdate::EndOfPeriod);
+                            }
                         }
                     }    
                 }
@@ -450,7 +485,19 @@ async fn run_runtime(
                 match cmd {
                     UiCmd::SetInputDevice(dev) => { input_device = dev; }
                     UiCmd::SetOutputDevice(dev) => { output_device = dev; }
-                    UiCmd::SetSlotPeriod(p) => { slot_period = p; last_slot_index = None; }
+                    UiCmd::SetSlotPeriod(p) => { 
+                        slot_period = p; 
+                        last_slot_index = None;
+                        save_config(&AppConfig {
+                            my_call: qso_engine.my_call.clone(),
+                            input_device: input_device.clone(),
+                            output_device: output_device.clone(),
+                            rig_model: current_rig_model.clone(),
+                            rig_port: current_rig_port.clone(),
+                            rig_baud: current_rig_baud.clone(),
+                            slot_period,
+                        });
+                    }
                     UiCmd::SetSlotParity(p) => { slot_parity_cfg = p; }
                     UiCmd::SetAutoQso(on) => { auto_qso = on; }
                     UiCmd::SetTxLevel(level) => { 
@@ -583,6 +630,7 @@ async fn run_runtime(
                             rig_model: current_rig_model.clone(),
                             rig_port: current_rig_port.clone(),
                             rig_baud: current_rig_baud.clone(),
+                            slot_period,
                         });
                         log::info!("[ENGINE] Audio settings applied & saved");
                     }
@@ -597,7 +645,15 @@ async fn run_runtime(
                                 rig_model: current_rig_model.clone(),
                                 rig_port: current_rig_port.clone(),
                                 rig_baud: current_rig_baud.clone(),
+                                slot_period,
                             });
+                        }
+                        
+                        // Release PTT if we were transmitting
+                        if tx_active {
+                            if let Some(h) = &hamlib { h.set_ptt(false); }
+                            tx_active = false;
+                            let _ = evt_tx.send(UiEvent::TxActive(false));
                         }
                         
                         qso_engine.set_their_call(if tc.is_empty() { None } else { Some(tc) });
@@ -777,7 +833,7 @@ async fn run_runtime(
                 };
 
                 if observed_remote_slot.is_none()
-                    || matches!(qso_engine.state, QsoState::Listening | QsoState::CallingCq | QsoState::CallingStn)
+                    || matches!(qso_engine.state, QsoState::Listening | QsoState::CallingCq)
                 {
                     observed_remote_slot = Some(decoded.rx_slot);
                     let my_new_tx_slot = 1 - decoded.rx_slot;

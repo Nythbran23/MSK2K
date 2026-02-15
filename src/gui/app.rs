@@ -42,6 +42,7 @@ struct LogEntry {
     text: String,
     colored: bool,
     timestamp: String,
+    rx_slot: Option<u8>,
 }
 
 struct Msk2kEguiApp {
@@ -211,10 +212,11 @@ impl Msk2kEguiApp {
     fn drain_events(&mut self) {
         while let Ok(ev) = self.engine.events.try_recv() {
             match ev {
-                UiEvent::ConfigLoaded { my_call, input_device, output_device, rig_model, rig_port, rig_baud } => {
+                UiEvent::ConfigLoaded { my_call, input_device, output_device, rig_model, rig_port, rig_baud, slot_period } => {
                     log::info!("[UI] ConfigLoaded event received");
                     
                     if !my_call.is_empty() { self.my_call = my_call.clone(); }
+                    self.slot_period = slot_period;
                     
                     if let Some(in_d) = input_device {
                         if self.in_devs.contains(&in_d) { self.sel_in = Some(in_d); }
@@ -264,18 +266,19 @@ impl Msk2kEguiApp {
 
                     if is_cq {
                         if *count == 1 {
-                            let _ = push_cap_entry(&mut self.cq_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone() });
+                            let _ = push_cap_entry(&mut self.cq_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone(), rx_slot: Some(rx_slot) });
                             self.cq_log_index.insert(key.clone(), self.cq_log.len().saturating_sub(1));
                         } else if let Some(&idx) = self.cq_log_index.get(&key) {
                             if idx < self.cq_log.len() { 
                                 self.cq_log[idx].text = display; 
                                 self.cq_log[idx].timestamp = ts;
+                                self.cq_log[idx].rx_slot = Some(rx_slot);
                                 if stamp { self.cq_log[idx].colored = true; } 
                             }
                         }
                     } else {
                         if *count == 1 {
-                            let _ = push_cap_entry(&mut self.rx_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone() });
+                            let _ = push_cap_entry(&mut self.rx_log, LogEntry { text: display.clone(), colored: stamp, timestamp: ts.clone(), rx_slot: Some(rx_slot) });
                             self.decode_log_index.insert(key.clone(), self.rx_log.len().saturating_sub(1));
                         } else if let Some(&idx) = self.decode_log_index.get(&key) {
                             if idx < self.rx_log.len() { 
@@ -286,7 +289,7 @@ impl Msk2kEguiApp {
                         }
                     }
                 }
-                UiEvent::TxText { text } => { push_cap_entry(&mut self.tx_log, LogEntry { text, colored: self.in_active_qso || !self.their_call.is_empty(), timestamp: String::new() }); }
+                UiEvent::TxText { text } => { push_cap_entry(&mut self.tx_log, LogEntry { text, colored: self.in_active_qso || !self.their_call.is_empty(), timestamp: String::new(), rx_slot: None }); }
                 UiEvent::State(s) => {
                     self.current_state = s.clone();
                     if s.contains("Listening") { self.is_listening = true; }
@@ -702,6 +705,7 @@ impl eframe::App for Msk2kEguiApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut clicked_call: Option<String> = None;
             let mut clicked_grid: Option<String> = None; 
+            let mut clicked_rx_slot: Option<u8> = None;
             ui.columns(3, |cols| {
                 for i in 0..3 {
                     cols[i].vertical(|ui| {
@@ -768,6 +772,7 @@ impl eframe::App for Msk2kEguiApp {
                                                     if let Some((call, grid)) = extract_callsign_and_grid(&entry.text) { 
                                                         clicked_call = Some(call);
                                                         clicked_grid = grid;
+                                                        clicked_rx_slot = entry.rx_slot;
                                                     } 
                                                 }
                                                 if !entry.timestamp.is_empty() {
@@ -787,11 +792,13 @@ impl eframe::App for Msk2kEguiApp {
 
             if let Some(target) = clicked_call { 
                 self.their_call = target.clone(); self.color_history_for_call(&target);
+                log::info!("⏱️ CQ CLICKED: their={} clicked_rx_slot={:?} last_rx_slot={:?}", target, clicked_rx_slot, self.last_rx_slot);
+                let _ = self.engine.cmds.send(UiCmd::SetSlotPeriod(self.slot_period));
                 let _ = self.engine.cmds.send(UiCmd::AnswerCq { 
                     my_call: self.my_call.clone(), 
                     their_call: target, 
                     rpt: self.calc_report(), 
-                    rx_slot: self.last_rx_slot,
+                    rx_slot: clicked_rx_slot,
                     grid: clicked_grid, 
                 }); 
             }

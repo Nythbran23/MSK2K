@@ -13,6 +13,10 @@ pub enum SlotPeriod {
     S30,
 }
 
+impl Default for SlotPeriod {
+    fn default() -> Self { SlotPeriod::S15 }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SlotParity {
     Odd,
@@ -123,6 +127,7 @@ pub enum UiEvent {
         rig_model: String,
         rig_port: String,
         rig_baud: String,
+        slot_period: SlotPeriod,
     },
     RigFreqChanged {
         freq_hz: u64,

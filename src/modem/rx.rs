@@ -37,6 +37,8 @@ pub enum RxConfigUpdate {
         slot_len_ms: u32,
     },
     EndOfPeriod,
+    PauseAudio,   // Stop audio capture (for ALSA device sharing) but keep task alive
+    ResumeAudio,  // Restart audio capture after TX
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +106,7 @@ pub async fn run_receiver(
     let mut max_retain_samples = (cfg.sample_rate as u64 * (cfg.slot_len_ms as u64 + 1000) / 1000) as usize;
     let mut retained_audio: Vec<f32> = Vec::with_capacity(max_retain_samples);
     let mut pending_accumulation = false;
+    let mut audio_paused = false;
     
     // 🔍 DIAGNOSTIC: Audio level monitoring
     let mut diag_sample_count: u64 = 0;
@@ -133,7 +136,7 @@ pub async fn run_receiver(
                         }
                     },
                     RxConfigUpdate::EndOfPeriod => {
-                        pending_accumulation = true;
+                        // Drain any remaining audio chunks into the accumulator
                         while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
                             for s in &mut chunk { *s *= 0.5; }
                             retained_audio.extend_from_slice(&chunk);
@@ -147,6 +150,43 @@ pub async fn run_receiver(
                         }
                         demod = PhaseDemodState::new();
                         extractor = MatrixSyncExtractor::new();
+
+                        // Process accumulation immediately - don't wait for next audio chunk
+                        let candidate_count = accumulator.candidate_count();
+                        log::info!("[ACCUM] EndOfPeriod: {} candidates to process", candidate_count);
+
+                        let utc_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+                        let period_ms = cfg.slot_len_ms as u64;
+                        let current_rx_slot = ((utc_ms as u64 / period_ms) % 2) as u8;
+
+                        if let Some(msg) = accumulator.process() {
+                            log::info!("[ACCUM] ✅ Accumulated decode: '{}'", msg.text);
+                            let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
+                            let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: current_rx_slot, is_private, is_accumulated: true };
+                            let _ = decoded_tx.send(decoded);
+                        }
+                        accumulator.clear();
+                        retained_audio.clear();
+                        pending_accumulation = false;
+                    },
+                    RxConfigUpdate::PauseAudio => {
+                        if !audio_paused {
+                            log::info!("[RX] Audio paused (ALSA device release for TX)");
+                            audio_input.stop();
+                            audio_paused = true;
+                        }
+                    },
+                    RxConfigUpdate::ResumeAudio => {
+                        if audio_paused {
+                            log::info!("[RX] Audio resumed");
+                            // Create a fresh audio channel and restart capture
+                            let (new_audio_tx, new_audio_rx) = mpsc::unbounded_channel::<Vec<f32>>();
+                            audio_chunk_rx = new_audio_rx;
+                            if let Err(e) = audio_input.start(new_audio_tx) {
+                                log::error!("[RX] Failed to restart audio capture: {:?}", e);
+                            }
+                            audio_paused = false;
+                        }
                     },
                 }
             }
@@ -197,38 +237,29 @@ pub async fn run_receiver(
                             let candidates = extractor.push_phase(&phases);
                             for candidate in &candidates {
                                 diag_candidate_count += 1; // 🔍 DIAGNOSTIC
-                                // 🟢 RESTORED: Only add to accumulator if Live Decode FAILS
+                                
+                                // Always add to accumulator for end-of-period processing
+                                accumulator.add(candidate.clone());
+                                
+                                // Also try live decode for immediate feedback
                                 if let Some(decoded) = decode_candidate(candidate, &cfg, utc_ms, current_rx_slot) {
                                     diag_decode_count += 1; // 🔍 DIAGNOSTIC
                                     log::info!("[LIVE]  ✅ '{}'", decoded.msg.text);
                                     let _ = decoded_tx.send(decoded);
-                                } else {
-                                    accumulator.add(candidate.clone());
                                 }
                             }
-                        }
-
-                        if pending_accumulation {
-                            // 🟢 LOG: Debug level (hidden by default) to stop "192" spam
-                            if accumulator.candidate_count() > 0 {
-                                debug!("[ACCUM] Processing {} candidates...", accumulator.candidate_count());
-                            }
-
-                            if let Some(msg) = accumulator.process() {
-                                let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
-                                let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: current_rx_slot, is_private, is_accumulated: true };
-                                let _ = decoded_tx.send(decoded);
-                            }
-                            
-                            // 🟢 CRITICAL: Reset accumulator
-                            accumulator.clear();
-                            retained_audio.clear();
-                            pending_accumulation = false;
                         }
                         
                         if retained_audio.len() > max_retain_samples { retained_audio.clear(); }
                     }
-                    None => break,
+                    None => {
+                        // Audio channel closed — if paused, this is expected, just wait for config updates
+                        if audio_paused {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
         }
