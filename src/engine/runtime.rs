@@ -904,7 +904,7 @@ async fn run_runtime(
                     }
 
                     if let Action::Transmit(tx_env) = action {
-                        let _ = evt_tx.send(UiEvent::TxText { text: tx_env.raw.clone() });
+                        //let _ = evt_tx.send(UiEvent::TxText { text: tx_env.raw.clone() });
                         let _ = tx_req_tx.send(TxRequest::Text {
                             rendered: tx_env.raw,
                             slot_len_ms: slot_len_ms(slot_period) as u32,
@@ -997,11 +997,11 @@ fn process_qso_events(
             EngineEvent::Info(msg) => {
                 let _ = evt_tx.send(UiEvent::Info(msg.clone()));
             }
-            EngineEvent::Tx(tx_env) => {
-                let _ = evt_tx.send(UiEvent::TxText {
-                    text: tx_env.raw.clone(),
-                });
-            }
+            //EngineEvent::Tx(tx_env) => {
+                //let _ = evt_tx.send(UiEvent::TxText {
+                    //text: tx_env.raw.clone(),
+               // });
+            //}
             _ => {}
         }
     }
