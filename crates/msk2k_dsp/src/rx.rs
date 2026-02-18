@@ -273,6 +273,7 @@ impl Default for MatrixSyncExtractor {
 }
 
 // Internal evaluation result
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct TimingEval {
     offset: usize,         // sub-bit offset τ (0..23) that produced this

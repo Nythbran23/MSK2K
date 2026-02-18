@@ -1,6 +1,6 @@
 [package]
 name = "msk2k"
-version = "0.1.28"
+version = "0.1.33"
 edition = "2021"
 authors = ["Roger Banks <GW4WND>"]
 description = "MSK2K digital mode transceiver for amateur radio"
@@ -10,11 +10,6 @@ default-run = "msk2k"
 [[bin]]
 name = "msk2k"
 path = "src/main.rs"
-
-[[bin]]
-name = "fft_test"
-path = "src/bin/fft_test.rs"
-required-features = ["fft_test"]
 
 [dependencies]
 # Local crates

@@ -319,11 +319,11 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
                 let is_general = is_general_addr(&pkt.addr_bits);
                 // Type field at bit positions 54,55 (0-indexed)
                 // [1,1] = Type 11 (CQ+Grid), [0,1] = Type 01 (Standard CQ/directed)
-                let b54 = pkt.info_bits.get(54).unwrap_or(&0);
                 let b55 = pkt.info_bits.get(55).unwrap_or(&0);
+                let b56 = pkt.info_bits.get(56).unwrap_or(&0);
                 
                 // 🟢 TRY 1: If type bits suggest Grid CQ, try grid decode first
-                if is_general && *b54 == 1 && *b55 == 1 {
+                if is_general && *b55 == 1 && *b56 == 1 {
                     if let Ok(grid_text) = codec.decode_cq_with_grid(&pkt.info_bits) {
                         let parts: Vec<&str> = grid_text.split_whitespace().collect();
                         let clean_call = parts.get(0).unwrap_or(&"?").to_string();
