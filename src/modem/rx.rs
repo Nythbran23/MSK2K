@@ -8,7 +8,7 @@ use cpal::traits::DeviceTrait;
 
 use msk2k_audio::{AudioConfig, AudioInputBuilder, DeviceManager};
 use msk2k_dsp::message::Message;
-use msk2k_dsp::rx::{PhaseDemodState, MatrixSyncExtractor, PacketCandidate, RxSync};
+use msk2k_dsp::rx::{MatrixSyncExtractor, PacketCandidate, RxSync};
 use msk2k_dsp::decode::{decode_packet_soft, is_general_addr};
 use msk2k_dsp::callsign::CallsignCodec;
 use crate::engine::accumulator::Accumulator;
@@ -100,7 +100,6 @@ pub async fn run_receiver(
         return;
     }
 
-    let mut demod = PhaseDemodState::new();
     let mut extractor = MatrixSyncExtractor::new();
     let mut accumulator = Accumulator::new(&cfg.my_call, cfg.their_call.clone());
     let mut max_retain_samples = (cfg.sample_rate as u64 * (cfg.slot_len_ms as u64 + 1000) / 1000) as usize;
@@ -140,15 +139,11 @@ pub async fn run_receiver(
                         while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
                             for s in &mut chunk { *s *= 0.5; }
                             retained_audio.extend_from_slice(&chunk);
-                            let phases = demod.push_audio(&chunk);
-                            if !phases.is_empty() {
-                                let candidates = extractor.push_phase(&phases);
-                                for candidate in candidates { 
-                                    accumulator.add(candidate);
-                                }
+                            let candidates = extractor.push_audio(&chunk);
+                            for candidate in candidates {
+                                accumulator.add(candidate);
                             }
                         }
-                        demod = PhaseDemodState::new();
                         extractor = MatrixSyncExtractor::new();
 
                         let candidate_count = accumulator.candidate_count();
@@ -176,15 +171,11 @@ pub async fn run_receiver(
                             while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
                                 for s in &mut chunk { *s *= 0.5; }
                                 retained_audio.extend_from_slice(&chunk);
-                                let phases = demod.push_audio(&chunk);
-                                if !phases.is_empty() {
-                                    let candidates = extractor.push_phase(&phases);
-                                    for candidate in candidates { 
-                                        accumulator.add(candidate);
-                                    }
+                                let candidates = extractor.push_audio(&chunk);
+                                for candidate in candidates {
+                                    accumulator.add(candidate);
                                 }
                             }
-                            demod = PhaseDemodState::new();
                             extractor = MatrixSyncExtractor::new();
 
                             let candidate_count = accumulator.candidate_count();
@@ -262,21 +253,18 @@ pub async fn run_receiver(
                         }
                         for s in &mut chunk { *s *= 0.5; }
 
-                        let phases = demod.push_audio(&chunk);
-                        if !phases.is_empty() {
-                            let candidates = extractor.push_phase(&phases);
-                            for candidate in &candidates {
-                                diag_candidate_count += 1; // 🔍 DIAGNOSTIC
-                                
-                                // Always add to accumulator for end-of-period processing
-                                accumulator.add(candidate.clone());
-                                
-                                // Also try live decode for immediate feedback
-                                if let Some(decoded) = decode_candidate(candidate, &cfg, utc_ms, last_audio_rx_slot) {
-                                    diag_decode_count += 1; // 🔍 DIAGNOSTIC
-                                    log::info!("[LIVE]  ✅ '{}'", decoded.msg.text);
-                                    let _ = decoded_tx.send(decoded);
-                                }
+                        let candidates = extractor.push_audio(&chunk);
+                        for candidate in &candidates {
+                            diag_candidate_count += 1; // 🔍 DIAGNOSTIC
+                            
+                            // Always add to accumulator for end-of-period processing
+                            accumulator.add(candidate.clone());
+                            
+                            // Also try live decode for immediate feedback
+                            if let Some(decoded) = decode_candidate(candidate, &cfg, utc_ms, last_audio_rx_slot) {
+                                diag_decode_count += 1; // 🔍 DIAGNOSTIC
+                                log::info!("[LIVE]  ✅ '{}'", decoded.msg.text);
+                                let _ = decoded_tx.send(decoded);
                             }
                         }
                         

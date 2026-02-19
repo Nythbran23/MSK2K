@@ -293,9 +293,9 @@ impl Msk2kEguiApp {
                 UiEvent::TxText { text } => { push_cap_entry(&mut self.tx_log, LogEntry { text, colored: self.in_active_qso || !self.their_call.is_empty(), timestamp: String::new(), rx_slot: None }); }
                 UiEvent::State(s) => {
                     self.current_state = s.clone();
-                    if s.contains("Listening") { self.is_listening = true; }
-                    else if s.contains("CallingCq") { self.is_listening = false; self.is_calling_cq = true; }
-                    else if s.contains("Sending") || s.contains("CallingStn") { self.is_listening = false; self.is_calling_cq = false; self.in_active_qso = true; }
+                    if s.contains("LISTEN") || s.contains("Listening") { self.is_listening = true; self.is_calling_cq = false; self.in_active_qso = false; }
+                    else if s.contains("CALLING_CQ") || s.contains("CallingCq") || s.contains("CQ mode") { self.is_listening = false; self.is_calling_cq = true; self.in_active_qso = false; }
+                    else if s.contains("SEND_") || s.contains("CALLING_STN") || s.contains("Sending") || s.contains("CallingStn") { self.is_listening = false; self.is_calling_cq = false; self.in_active_qso = true; }
                 }
                 UiEvent::TheirCallChanged { callsign, grid } => { 
                     self.their_call = callsign.clone(); 

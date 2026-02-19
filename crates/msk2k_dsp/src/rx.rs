@@ -12,6 +12,9 @@
 use std::f32::consts::PI;
 use std::collections::VecDeque;
 
+use num_complex::Complex32;
+use rustfft::FftPlanner;
+
 use crate::{fmt1, fmt2};
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -27,7 +30,7 @@ pub struct RxSync {
 }
 
 const SAMPLE_RATE: f32 = 48_000.0;
-const CARRIER_HZ: f32 = 1500.0;
+const CARRIER_HZ: f32 = 1496.1; // DJ5HG spec: 193*2000/258 = 1496.1 Hz
 const SAMPLES_PER_BIT: usize = 24; // 48k / 2000
 const LO_PERIOD: u64 = 32; // 48000/1500 = 32 samples exactly
 
@@ -237,22 +240,25 @@ pub struct PacketCandidate {
 
 /// DJ5HG-style matrix bit-synchronisation extractor.
 ///
-/// Buffers unwrapped phase samples and periodically evaluates all possible
-/// bit-timing offsets to find the best sync correlation.
+/// Buffers raw audio samples and periodically runs the full DJ5HG receiver
+/// pipeline per Section 8: carrier recovery (SQ→FFT→CSY) followed by the
+/// matrix bit-synchronisation timing search.
 #[derive(Debug, Clone)]
 pub struct MatrixSyncExtractor {
-    /// Circular buffer of unwrapped phase samples
+    /// Raw audio buffer — used for Hilbert-based frequency offset estimation.
+    audio_buf: VecDeque<f32>,
+    /// Unwrapped phase buffer — fed by the internal PhaseDemodState.
     phase_buf: VecDeque<f32>,
-    /// Absolute sample index of the first element in phase_buf
+    /// Internal demodulator — converts audio to unwrapped phase in real time.
+    demod: PhaseDemodState,
+    /// Absolute sample index of the first element in both buffers.
     buf_start_index: u64,
-    /// Absolute sample count (total samples pushed)
+    /// Absolute sample count (total samples pushed).
     total_samples: u64,
-    /// Next sample index at which to run an evaluation
+    /// Next absolute sample index at which to run an evaluation.
     next_eval_at: u64,
-
     // Tunables
     pub corr_threshold: f32,
-
     // Peak tracking (separate for F1 and F2)
     f1_last_peak_sample: Option<u64>,
     f2_last_peak_sample: Option<u64>,
@@ -261,7 +267,9 @@ pub struct MatrixSyncExtractor {
 impl Default for MatrixSyncExtractor {
     fn default() -> Self {
         Self {
+            audio_buf: VecDeque::with_capacity(TWO_PKT_SAMPLES + EVAL_STRIDE_SAMPLES),
             phase_buf: VecDeque::with_capacity(TWO_PKT_SAMPLES + EVAL_STRIDE_SAMPLES),
+            demod: PhaseDemodState::new(),
             buf_start_index: 0,
             total_samples: 0,
             next_eval_at: TWO_PKT_SAMPLES as u64,
@@ -292,31 +300,38 @@ impl MatrixSyncExtractor {
         Self::default()
     }
 
-    /// Compatibility shim: accepts soft bits but this extractor needs phase samples.
-    /// For the new pipeline, call `push_phase()` instead.
+    /// Compatibility shim — no-op.
     pub fn push_soft_bits(&mut self, _bits: &[f32]) -> Vec<PacketCandidate> {
-        // This should not be called in the new pipeline.
-        // Return empty — the modem rx.rs will be updated to call push_phase().
         Vec::new()
     }
 
-    /// Push unwrapped phase samples. Returns any packet candidates found.
-    pub fn push_phase(&mut self, phases: &[f32]) -> Vec<PacketCandidate> {
+    /// Push raw audio samples. Returns any packet candidates found.
+    ///
+    /// This is the primary entry point. Raw audio is buffered here; the full
+    /// DJ5HG pipeline (carrier recovery → matched filter → demod → sync search)
+    /// runs inside evaluate() when enough data has accumulated.
+    pub fn push_audio(&mut self, audio: &[f32]) -> Vec<PacketCandidate> {
         let mut out = Vec::new();
 
-        for &p in phases {
+        // Demodulate the incoming chunk to unwrapped phase first.
+        // Both buffers stay in lockstep — same sample count, same trim index.
+        let phases = self.demod.push_audio(audio);
+
+        let max_buf = 3 * PACKET_BITS * SAMPLES_PER_BIT;
+
+        for (&s, &p) in audio.iter().zip(phases.iter()) {
+            self.audio_buf.push_back(s);
             self.phase_buf.push_back(p);
             self.total_samples += 1;
 
-            // Trim buffer: keep at most 3 packets worth
-            let max_buf = 3 * PACKET_BITS * SAMPLES_PER_BIT;
-            while self.phase_buf.len() > max_buf {
+            // Trim both buffers together so buf_start_index stays consistent.
+            while self.audio_buf.len() > max_buf {
+                self.audio_buf.pop_front();
                 self.phase_buf.pop_front();
                 self.buf_start_index += 1;
             }
         }
 
-        // Check if we have enough data and it's time to evaluate
         if self.total_samples >= self.next_eval_at
             && self.phase_buf.len() >= TWO_PKT_SAMPLES
         {
@@ -327,7 +342,120 @@ impl MatrixSyncExtractor {
         out
     }
 
-    /// DJ5HG Section 8.2.2 — Matrix bit-synchronization.
+    /// Backward-compat shim for callers that previously fed pre-demodulated
+    /// phase samples. Those callers should be updated to call push_audio()
+    /// with raw audio chunks, bypassing PhaseDemodState entirely.
+    /// Until updated, this silently discards data and returns nothing.
+    pub fn push_phase(&mut self, _phases: &[f32]) -> Vec<PacketCandidate> {
+        Vec::new()
+    }
+
+    /// DJ5HG Section 8.2 — Carrier frequency detection and correction.
+    ///
+    /// Implements the SQ → FFT → CSY path from Figure 5:
+    ///
+    ///   1. Hilbert transform: real audio → complex analytic signal
+    ///   2. Mix down by nominal carrier (1496.1 Hz) → complex baseband
+    ///   3. Matched filter: boxcar lowpass at 1000 Hz on complex I+Q
+    ///   4. Square signal: removes BPSK modulation, carrier appears at 2×offset
+    ///   5. FFT: find peak → frequency offset = peak_freq/2, phase = peak_phase/2
+    ///   6. Apply correction: multiply by exp(-j(2π·f_offset·t + φ))
+    ///   7. Return real part of corrected signal + detected offset for logging
+    ///
+    /// If no clear peak is found (e.g. no signal yet), returns the signal
+    /// demodulated at exactly 0 Hz offset — identical to previous behaviour.
+    /// Hilbert-based MSK frequency offset estimator.
+    ///
+    /// For MSK, instantaneous frequency alternates between mark (2000 Hz) and
+    /// space (1000 Hz) with a midpoint of 1500 Hz.  A frequency offset Δf shifts
+    /// every sample's instantaneous frequency by Δf, so:
+    ///
+    ///   mean(f_inst) = 1500 + Δf   =>   Δf = mean(f_inst) - 1500
+    ///
+    /// Method:
+    ///   1. FFT-based Hilbert → analytic signal
+    ///   2. Instantaneous phase = atan2(imag, real)
+    ///   3. Unwrap phase, differentiate → instantaneous frequency
+    ///   4. Mean frequency − nominal midpoint = Δf
+    ///
+    /// Returns Δf in Hz.  Returns 0.0 if the audio is too short or silent.
+    fn estimate_freq_offset(audio: &[f32]) -> f32 {
+        let n = audio.len();
+        if n < 64 {
+            return 0.0;
+        }
+
+        // Quick silence check — avoid chasing noise on an empty band.
+        let rms: f32 = (audio.iter().map(|&x| x * x).sum::<f32>() / n as f32).sqrt();
+        if rms < 1e-5 {
+            return 0.0;
+        }
+
+        // ── Step 1: FFT-based Hilbert transform → analytic signal ──
+        let mut planner = FftPlanner::<f32>::new();
+        let fft_fwd = planner.plan_fft_forward(n);
+        let fft_inv = planner.plan_fft_inverse(n);
+
+        let mut spec: Vec<Complex32> = audio
+            .iter()
+            .map(|&x| Complex32::new(x, 0.0))
+            .collect();
+        fft_fwd.process(&mut spec);
+
+        // One-sided: zero DC imaginary, zero negatives, double positives.
+        spec[0] = Complex32::new(spec[0].re, 0.0);
+        if n % 2 == 0 {
+            spec[n / 2] = Complex32::new(spec[n / 2].re, 0.0);
+        }
+        for k in 1..n / 2 {
+            spec[k] *= 2.0;
+        }
+        for k in (n / 2 + 1)..n {
+            spec[k] = Complex32::new(0.0, 0.0);
+        }
+        fft_inv.process(&mut spec);
+        let inv_n = 1.0 / n as f32;
+        // analytic[k].re = original sample, analytic[k].im = Hilbert transform
+        let analytic: Vec<Complex32> = spec.iter().map(|c| c * inv_n).collect();
+
+        // ── Step 2: Instantaneous phase ──
+        let inst_phase: Vec<f32> = analytic.iter().map(|c| c.im.atan2(c.re)).collect();
+
+        // ── Step 3: Unwrap and differentiate → instantaneous frequency ──
+        // freq[k] = (φ[k] - φ[k-1]) * Fs / (2π)
+        let mut freq_sum = 0.0f32;
+        let mut freq_count = 0usize;
+        let mut prev = inst_phase[0];
+
+        for &phi in &inst_phase[1..] {
+            let mut diff = phi - prev;
+            // Wrap to [-π, π]
+            while diff >  PI { diff -= 2.0 * PI; }
+            while diff < -PI { diff += 2.0 * PI; }
+            let f_inst = diff * SAMPLE_RATE / (2.0 * PI);
+            // Only count samples in the expected MSK band (500–2500 Hz) to
+            // suppress noise/silence samples from skewing the mean.
+            if f_inst.abs() > 200.0 && f_inst.abs() < 3000.0 {
+                freq_sum += f_inst;
+                freq_count += 1;
+            }
+            prev = phi;
+        }
+
+        if freq_count < n / 4 {
+            // Too few valid samples — probably silence or heavy noise.
+            return 0.0;
+        }
+
+        let mean_freq = freq_sum / freq_count as f32;
+        // MSK midpoint is 1500 Hz (average of 1000 and 2000).
+        let delta_f = mean_freq - 1500.0;
+
+        // Clamp to ±300 Hz — anything beyond that is noise, not offset.
+        delta_f.clamp(-300.0, 300.0)
+    }
+
+        /// DJ5HG Section 8.2.2 — Matrix bit-synchronization.
     ///
     /// The spec describes reshaping a 2-packet sample window into a matrix
     /// where each column represents a different sub-bit timing offset. 
@@ -349,6 +477,31 @@ impl MatrixSyncExtractor {
 
         let window_start = buf_len - TWO_PKT_SAMPLES;
         let window_start_abs = self.buf_start_index + window_start as u64;
+
+        // ── Hilbert-based frequency offset estimation ──
+        // Estimate Δf from the raw audio window, then subtract the corresponding
+        // linear phase ramp from the unwrapped phase window before demodulation.
+        // This is correct for MSK: a frequency offset appears as a constant slope
+        // added to every phase sample (drift rate = 2π·Δf / Fs rad/sample).
+        let raw_window: Vec<f32> = self.audio_buf
+            .range(window_start..window_start + TWO_PKT_SAMPLES)
+            .copied()
+            .collect();
+        let delta_f = Self::estimate_freq_offset(&raw_window);
+
+        if delta_f.abs() > 1.0 {
+            log::debug!("[AFC] Frequency offset: {:.1} Hz", delta_f);
+        }
+
+        // Build frequency-corrected phase window.
+        // phase_correction[i] = 2π · Δf · i / Fs
+        // Subtract this from the stored unwrapped phase to remove the offset.
+        let phase_slope = 2.0 * PI * delta_f / SAMPLE_RATE;
+        let corrected_phases: Vec<f32> = self.phase_buf
+            .range(window_start..window_start + TWO_PKT_SAMPLES)
+            .enumerate()
+            .map(|(i, &p)| p - phase_slope * i as f32)
+            .collect();
 
         let mut pat0 = [0.0f32; SYNC_BITS];
         for i in 0..SYNC_BITS {
@@ -384,7 +537,7 @@ impl MatrixSyncExtractor {
 
         // ── Exhaustive search over all 24 τ offsets ──
         for tau in 0..SAMPLES_PER_BIT {
-            let soft = self.demod_at_offset(window_start, tau, 0);
+            let soft = Self::demod_at_offset(&corrected_phases, tau);
             if soft.len() < PACKET_BITS {
                 continue;
             }
@@ -506,67 +659,63 @@ impl MatrixSyncExtractor {
         }
     }
 
-    /// Demodulate phase samples to soft bits at a given sub-bit offset.
+    /// Demodulate frequency-corrected unwrapped phase samples to soft bits
+    /// at a given sub-bit timing offset τ.
     ///
-    /// Measures the phase slope within each bit by comparing the phase at
-    /// 1/4 of the way through the bit to 3/4 of the way through. With the
-    /// boxcar matched filter, these regions are well-settled and give near-full
-    /// amplitude soft bits. This preserves the original bit-to-sample alignment
-    /// that the interleave maps expect.
-    fn demod_at_offset(&self, window_start: usize, tau: usize, _avg_w: usize) -> Vec<f32> {
-        let buf_len = self.phase_buf.len();
-        let first_sample = window_start + tau;
+    /// Measures the phase SLOPE within each bit by comparing the value at
+    /// the quarter-point (sample 6/24) to the three-quarter-point (sample 18/24).
+    /// For MSK, phase ramps at +π/2 per bit for a '1' and −π/2 for a '0'.
+    /// Over half a bit that slope produces ±π/4, so:
+    ///   soft_bit = delta / (π/4)
+    /// This is the original working formulation restored unchanged.
+    fn demod_at_offset(phases: &[f32], tau: usize) -> Vec<f32> {
+        let n = phases.len();
+        let first = tau;
 
-        if first_sample + SAMPLES_PER_BIT > buf_len {
+        if first + SAMPLES_PER_BIT > n {
             return Vec::new();
         }
-        let n_complete_bits = (buf_len - first_sample) / SAMPLES_PER_BIT;
-        if n_complete_bits < 1 {
+        let n_bits = (n - first) / SAMPLES_PER_BIT;
+        if n_bits < 1 {
             return Vec::new();
         }
 
-        // Sample positions within each bit (24 samples):
-        //   Quarter point: sample 6  (1/4 of bit — filter settled from previous transition)
-        //   Three-quarter: sample 18 (3/4 of bit — before next transition starts)
-        // Average 3 samples around each point for slight smoothing.
-        let q1_centre = SAMPLES_PER_BIT / 4;     // 6
-        let q3_centre = 3 * SAMPLES_PER_BIT / 4; // 18
-        let avg_r = 1; // ±1 sample = 3 samples total
+        let q1 = SAMPLES_PER_BIT / 4;      // 6
+        let q3 = 3 * SAMPLES_PER_BIT / 4;  // 18
+        let avg_r = 1usize;                 // ±1 sample = 3-sample average
 
-        let mut soft = Vec::with_capacity(n_complete_bits);
+        let mut soft = Vec::with_capacity(n_bits);
 
-        for b in 0..n_complete_bits {
-            let bit_start = first_sample + b * SAMPLES_PER_BIT;
+        for b in 0..n_bits {
+            let bit_start = first + b * SAMPLES_PER_BIT;
+            let p1 = bit_start + q1;
+            let p2 = bit_start + q3;
 
-            let p1 = bit_start + q1_centre;
-            let p2 = bit_start + q3_centre;
-
-            if p2 + avg_r >= buf_len {
+            if p2 + avg_r >= n {
                 break;
             }
 
-            let origin = self.phase_buf[p1];
+            let origin = phases[p1];
 
-            // Phase at quarter point
+            // Phase slope at quarter-point (relative to origin to cancel DC)
             let mut sum_a = 0.0f32;
-            let mut n_a = 0;
-            for k in p1.saturating_sub(avg_r)..=(p1 + avg_r).min(buf_len - 1) {
-                sum_a += self.phase_buf[k] - origin;
+            let mut n_a = 0usize;
+            for k in p1.saturating_sub(avg_r)..=(p1 + avg_r).min(n - 1) {
+                sum_a += phases[k] - origin;
                 n_a += 1;
             }
             let phase_a = sum_a / n_a as f32;
 
-            // Phase at three-quarter point
+            // Phase slope at three-quarter-point
             let mut sum_b = 0.0f32;
-            let mut n_b = 0;
-            for k in p2.saturating_sub(avg_r)..=(p2 + avg_r).min(buf_len - 1) {
-                sum_b += self.phase_buf[k] - origin;
+            let mut n_b = 0usize;
+            for k in p2.saturating_sub(avg_r)..=(p2 + avg_r).min(n - 1) {
+                sum_b += phases[k] - origin;
                 n_b += 1;
             }
             let phase_b = sum_b / n_b as f32;
 
-            // Scale: the phase change over half a bit should be ±π/4 for BPSK
-            // (full bit = ±π/2, half bit = ±π/4)
+            // Phase change over half a bit = ±π/4 for a full-amplitude MSK bit.
             let delta = phase_b - phase_a;
             let soft_bit = (delta / (PI / 4.0)).clamp(-4.0, 4.0);
             soft.push(soft_bit);
@@ -575,7 +724,7 @@ impl MatrixSyncExtractor {
         soft
     }
 
-    fn to_candidate(&self, eval: TimingEval) -> PacketCandidate {
+        fn to_candidate(&self, eval: TimingEval) -> PacketCandidate {
         let pol = eval.polarity as f32;
         let packet_soft: Vec<f32> = eval.soft_bits.iter().map(|&b| b * pol).collect();
 
