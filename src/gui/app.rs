@@ -616,16 +616,26 @@ impl eframe::App for Msk2kEguiApp {
                 ui.add_space(20.0);
                 
                 // Frequency display:
-                //   · CAT confirmed → green frequency
-                //   · Not connected (disabled or waiting) → grey "No CAT"
-                let (freq_display, freq_color) = if self.cat_connected {
-                    let freq = self.rig_freq_hz.unwrap(); // cat_connected is only true when Some
-                    let khz = ((freq + 500) / 1000) * 1000;
-                    (format!("{:.3} MHz", khz as f64 / 1_000_000.0), egui::Color32::from_rgb(100, 200, 130))
+                //   · CAT confirmed → green  "144.174.25 MHz"  (Hz digits smaller)
+                //   · Not connected → grey   "No CAT"
+                if self.cat_connected {
+                    let freq = self.rig_freq_hz.unwrap();
+                    let mhz   = freq / 1_000_000;
+                    let khz   = (freq % 1_000_000) / 1_000;
+                    let hz    = (freq % 1_000) / 10; // two significant Hz digits
+                    let color = egui::Color32::from_rgb(100, 200, 130);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(egui::RichText::new(format!("{}.{:03}.", mhz, khz)).monospace().size(16.0).color(color));
+                        ui.vertical(|ui| {
+                            ui.add_space(5.0);
+                            ui.label(egui::RichText::new(format!("{:02}", hz)).monospace().size(11.0).color(color));
+                        });
+                        ui.label(egui::RichText::new(" MHz").monospace().size(16.0).color(color));
+                    });
                 } else {
-                    ("No CAT".to_string(), egui::Color32::from_rgb(255, 165, 0))
+                    ui.label(egui::RichText::new("No CAT").monospace().size(16.0).color(egui::Color32::GRAY));
                 };
-                ui.label(egui::RichText::new(&freq_display).monospace().size(16.0).color(freq_color));
                 
                 let saved_selection = ui.visuals().selection.bg_fill;
                 let _saved_inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
