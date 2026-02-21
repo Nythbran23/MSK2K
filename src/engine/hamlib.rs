@@ -81,6 +81,8 @@ async fn run_hamlib_client(
                             debug!("[Hamlib] TX: {:?}", cmd_str.trim());
                             if let Err(e) = writer.write_all(cmd_str.as_bytes()).await {
                                 error!("[Hamlib] Write error: {}", e);
+                                // Signal UI that CAT link is lost before reconnecting
+                                let _ = update_tx.send(HamlibUpdate { freq: None, mode: None, ptt_active: false });
                                 break; // Break inner loop to trigger reconnect
                             }
                             
@@ -90,9 +92,17 @@ async fn run_hamlib_client(
                             } 
                             else if matches!(cmd, HamlibCmd::GetFreq) {
                                 buf.clear();
-                                if reader.read_line(&mut buf).await.is_ok() {
-                                    if let Ok(freq) = buf.trim().parse::<u64>() {
-                                        let _ = update_tx.send(HamlibUpdate { freq: Some(freq), mode: None, ptt_active: false });
+                                match reader.read_line(&mut buf).await {
+                                    Ok(0) | Err(_) => {
+                                        // EOF or read error — connection dropped
+                                        error!("[Hamlib] Read error or EOF, signalling CAT lost");
+                                        let _ = update_tx.send(HamlibUpdate { freq: None, mode: None, ptt_active: false });
+                                        break;
+                                    }
+                                    Ok(_) => {
+                                        if let Ok(freq) = buf.trim().parse::<u64>() {
+                                            let _ = update_tx.send(HamlibUpdate { freq: Some(freq), mode: None, ptt_active: false });
+                                        }
                                     }
                                 }
                             }

@@ -90,6 +90,8 @@ struct Msk2kEguiApp {
     available_ports: Vec<String>,
     rig_list: Vec<(String, String)>, // Stores (ID, Name) e.g. ("3081", "Icom IC-9700")
     rig_search: String,
+    cat_connected: bool,  // True only after a fresh RigFreqChanged is received post-boot
+    last_cat_rx: Option<std::time::Instant>, // When we last got a valid freq from CAT
 }
 
 impl Msk2kEguiApp {
@@ -185,6 +187,8 @@ impl Msk2kEguiApp {
             available_ports: Vec::new(),
             rig_list,
             rig_search: String::new(),
+            cat_connected: false,
+            last_cat_rx: None,
         }
     }
 
@@ -216,6 +220,11 @@ impl Msk2kEguiApp {
                 UiEvent::ConfigLoaded { my_call, input_device, output_device, rig_model, rig_port, rig_baud, slot_period } => {
                     log::info!("[UI] ConfigLoaded event received");
                     
+                    // Reset CAT state — don't trust any frequency until a fresh read arrives
+                    self.rig_freq_hz = None;
+                    self.cat_connected = false;
+                    self.last_cat_rx = None;
+
                     if !my_call.is_empty() { self.my_call = my_call.clone(); }
                     self.slot_period = slot_period;
                     
@@ -329,13 +338,27 @@ impl Msk2kEguiApp {
                     }
                 }
                 UiEvent::RigFreqChanged { freq_hz } => {
+                    self.cat_connected = true;
                     self.rig_freq_hz = Some(freq_hz);
                     self.band = freq_to_band(freq_hz);
+                    self.last_cat_rx = Some(std::time::Instant::now());
                 }
                 UiEvent::TxActive(active) => {
                     self.is_transmitting = active;
                 }
                 _ => {}
+            }
+        }
+
+        // Belt-and-braces: if CAT was connected but we've had no update for >5s, flag as lost.
+        // This catches cases where hamlib goes silent without an error (e.g. rigctld killed externally).
+        if self.cat_connected {
+            if let Some(last) = self.last_cat_rx {
+                if last.elapsed().as_secs() > 5 {
+                    log::warn!("[UI] CAT timeout — no freq update for >5s, flagging as lost");
+                    self.cat_connected = false;
+                    self.rig_freq_hz = None;
+                }
             }
         }
     }
@@ -537,6 +560,11 @@ impl eframe::App for Msk2kEguiApp {
                     || self.rig_baud != self.config.station.rig_baud;
 
                 if cat_changed {
+                    // CAT config changed — drop the stale frequency until a fresh read arrives
+                    self.rig_freq_hz = None;
+                    self.cat_connected = false;
+                    self.last_cat_rx = None;
+
                     if self.hamlib_enabled {
                         let baud = self.rig_baud.parse().unwrap_or(19200);
                         let _ = self.engine.cmds.send(UiCmd::ConfigureLauncher { 
@@ -587,14 +615,17 @@ impl eframe::App for Msk2kEguiApp {
                 ui.label(egui::RichText::new(&self.my_call).strong().size(22.0).color(egui::Color32::GRAY));
                 ui.add_space(20.0);
                 
-                // Frequency from rig (or "No CAT" if not connected)
-                let freq_display = if let Some(freq) = self.rig_freq_hz {
+                // Frequency display:
+                //   · CAT confirmed → green frequency
+                //   · Not connected (disabled or waiting) → grey "No CAT"
+                let (freq_display, freq_color) = if self.cat_connected {
+                    let freq = self.rig_freq_hz.unwrap(); // cat_connected is only true when Some
                     let khz = ((freq + 500) / 1000) * 1000;
-                    format!("{:.3} MHz", khz as f64 / 1_000_000.0)
+                    (format!("{:.3} MHz", khz as f64 / 1_000_000.0), egui::Color32::from_rgb(100, 200, 130))
                 } else {
-                    "No CAT".to_string()
+                    ("No CAT".to_string(), egui::Color32::from_rgb(255, 165, 0))
                 };
-                ui.label(egui::RichText::new(&freq_display).monospace().size(16.0).color(egui::Color32::from_rgb(100, 200, 130)));
+                ui.label(egui::RichText::new(&freq_display).monospace().size(16.0).color(freq_color));
                 
                 let saved_selection = ui.visuals().selection.bg_fill;
                 let _saved_inactive_bg = ui.visuals().widgets.inactive.weak_bg_fill;
