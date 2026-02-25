@@ -287,8 +287,12 @@ pub async fn run_receiver(
 
 fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, rx_slot: u8) -> Option<RxDecoded> {
     let sync = &candidate.sync;
-    if sync.sync_bits < 35 && sync.correlation < 0.40 { return None; }
-
+    log::info!("[DECODE] candidate: sync_bits={} corr={:.3} format_hint={}",
+               sync.sync_bits, sync.correlation, sync.format_hint);
+    if sync.sync_bits < 35 && sync.correlation < 0.40 {
+        log::info!("[DECODE] rejected by gate");
+        return None;
+    }
     let codec = CallsignCodec::new();
     let shifts = [(0, 1), (14, 2), (29, 2)];
 
@@ -300,6 +304,7 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
         };
 
         if let Some(pkt) = decode_packet_soft(&candidate.packet_soft, &ts) {
+            log::info!("[DECODE] pkt format={} addr_bits={:?}", pkt.format, &pkt.addr_bits[..8.min(pkt.addr_bits.len())]);
             let mut msg_res = None;
 
             // 🟢 FORMAT 1: Try both Grid and Standard decode paths
@@ -339,6 +344,17 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
                 msg_res = Some(Message::from_format2_bits(&codec, &pkt.info_bits, &pkt.addr_bits, &cfg.my_call, cfg.their_call.as_deref().unwrap_or("")));
             }
 
+            match &msg_res {
+                Some(Ok(msg)) => {
+                    log::info!("[DECODE] msg ok: from='{}' text='{}'", msg.from_call, msg.text);
+                }
+                Some(Err(e)) => {
+                    log::info!("[DECODE] msg parse failed: {:?}", e);
+                }
+                None => {
+                    log::info!("[DECODE] msg_res was None");
+                }
+            }
             if let Some(Ok(msg)) = msg_res {
                 if msg.from_call == cfg.my_call { continue; }
                 let is_private_msg = pkt.format == 2 || (pkt.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");

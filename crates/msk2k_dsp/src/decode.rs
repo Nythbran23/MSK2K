@@ -50,6 +50,9 @@ pub fn decode_packet_soft(packet_soft: &[f32], sync: &RxSync) -> Option<DecodedP
     if !sync.found || packet_soft.len() != 258 {
         return None;
     }
+    let soft_sample: Vec<f32> = packet_soft.iter().take(16)
+        .map(|x| (x * 100.0).round() / 100.0).collect();
+    log::info!("[DECODE] soft_bits[0..16]: {:?}", soft_sample);
 
     let packet_hard: Vec<i32> = packet_soft
         .iter()
