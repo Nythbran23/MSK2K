@@ -89,7 +89,8 @@ pub async fn run_receiver(
     };
     log::info!("[RX] Opening Device: {}", device.name().unwrap_or_default());
 
-    let audio_cfg = AudioConfig::new(cfg.sample_rate, 1, cfg.buffer_size);
+    // 🟢 FORCE 2 CHANNELS: This prevents macOS from downmixing L+R and ruining the phase data
+    let audio_cfg = AudioConfig::new(cfg.sample_rate, 2, cfg.buffer_size);
     let mut audio_input = match AudioInputBuilder::new().device(device).config(audio_cfg).build() {
         Ok(ai) => ai,
         Err(e) => { log::error!("[RX] Failed to build AudioInput: {:?}", e); return; }

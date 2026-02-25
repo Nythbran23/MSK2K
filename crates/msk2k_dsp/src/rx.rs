@@ -252,10 +252,8 @@ impl MatrixSyncExtractor {
             .copied()
             .collect();
 
-        // ── MSK Pipeline Replacement ────────────────────────────────────────
         // Generate continuous soft bits for the entire block using DM
         let soft_stream = demodulate_msk_delay_multiply(&audio_window);
-        // ────────────────────────────────────────────────────────────────────
 
         let mut pat0 = [0.0f32; SYNC_BITS];
         for i in 0..SYNC_BITS {
@@ -282,7 +280,7 @@ impl MatrixSyncExtractor {
         let mut f1_best: Option<TimingEval> = None;
         let mut f2_best: Option<TimingEval> = None;
 
-        // ── Matrix timing search ─────────────────────────────────────────────
+        // ── Matrix timing search (Static rigid hop for sync only) ────────────
         for tau in 0..SAMPLES_PER_BIT {
             // Directly subsample the soft_stream at offset tau
             let mut soft = Vec::with_capacity((soft_stream.len() - tau) / SAMPLES_PER_BIT);
@@ -315,6 +313,13 @@ impl MatrixSyncExtractor {
 
                 if ca_f1 > f1_best.as_ref().map(|b| b.corr_abs).unwrap_or(self.corr_threshold) {
                     let pol = if corr_f1 >= 0.0 { 1i32 } else { -1i32 };
+                    
+                    // 🟢 WSJT-X GARDNER TIMING RECOVERY
+                    // We found a peak using rigid sampling. Now mathematically
+                    // re-extract the exact soft bits using dynamic PLL tracking.
+                    let start_sample_idx = tau + start * SAMPLES_PER_BIT;
+                    let dynamic_soft = extract_dynamic_timing(&soft_stream, start_sample_idx);
+                    
                     f1_best = Some(TimingEval {
                         offset: tau,
                         corr_abs: ca_f1,
@@ -323,7 +328,7 @@ impl MatrixSyncExtractor {
                         sync_shift: 0,
                         sync_rotation: 0,
                         format_hint: 1,
-                        soft_bits: pkt.to_vec(),
+                        soft_bits: dynamic_soft,
                         end_sample,
                     });
                 }
@@ -351,6 +356,11 @@ impl MatrixSyncExtractor {
 
                     if ca > f2_best.as_ref().map(|b| b.corr_abs).unwrap_or(self.corr_threshold) {
                         let pol = if corr >= 0.0 { 1i32 } else { -1i32 };
+                        
+                        // 🟢 WSJT-X GARDNER TIMING RECOVERY
+                        let start_sample_idx = tau + start * SAMPLES_PER_BIT;
+                        let dynamic_soft = extract_dynamic_timing(&soft_stream, start_sample_idx);
+                        
                         f2_best = Some(TimingEval {
                             offset: tau,
                             corr_abs: ca,
@@ -359,7 +369,7 @@ impl MatrixSyncExtractor {
                             sync_shift: label,
                             sync_rotation: rotation,
                             format_hint: 2,
-                            soft_bits: pkt.to_vec(),
+                            soft_bits: dynamic_soft,
                             end_sample,
                         });
                     }
@@ -664,4 +674,74 @@ fn deinterleave_sync_soft_f2(window: &[f32]) -> [f32; SYNC_BITS] {
         }
     }
     out
+}
+
+// ============================================================================
+// Gardner Timing Error Detector (TED)
+// ============================================================================
+
+/// Uses a Gardner phase-locked loop (PLL) to dynamically surf the exact center
+/// of the MSK eye diagram. This corrects clock drift in real-world soundcards
+/// or WAV file playback, similar to the WSJT-X MSK144 approach.
+fn extract_dynamic_timing(soft_stream: &[f32], start_sample: usize) -> Vec<f32> {
+    let mut soft_bits = Vec::with_capacity(PACKET_BITS);
+    
+    let mut current_idx = start_sample as f32;
+    let mut prev_soft = 0.0f32;
+    let mut samples_per_bit = SAMPLES_PER_BIT as f32;
+
+    // PLL Proportional and Integral loop gains
+    let alpha = 0.1_f32;
+    let beta = 0.005_f32;
+
+    for i in 0..PACKET_BITS {
+        let idx_usize = current_idx.round() as usize;
+        
+        // Bounds check in case the packet runs off the edge of the block
+        if idx_usize >= soft_stream.len() {
+            soft_bits.push(0.0);
+            continue;
+        }
+
+        let soft = soft_stream[idx_usize];
+        soft_bits.push(soft);
+
+        // Once we have a previous bit, we can check the transition between them
+        if i > 0 {
+            // Find the sample exactly halfway between the previous bit and the current bit
+            let boundary_idx = (current_idx - samples_per_bit / 2.0).round() as usize;
+            
+            if boundary_idx < soft_stream.len() {
+                let boundary_val = soft_stream[boundary_idx];
+                
+                // Only run the TED if there is a zero-crossing transition (+ to - or - to +)
+                let sign_diff = prev_soft.signum() - soft.signum();
+                if sign_diff.abs() > 0.5 {
+                    // Gardner Error Math: E = V_boundary * (sgn(V_prev) - sgn(V_curr))
+                    let error = boundary_val * sign_diff * 0.5;
+                    
+                    // Nudge the fractional sampling pointer
+                    current_idx += alpha * error;
+                    
+                    // Slightly adjust the long-term clock rate (to handle actual drift)
+                    samples_per_bit += beta * error;
+                    
+                    // Clamp to prevent wild runaways on noisy data (±2 samples)
+                    samples_per_bit = samples_per_bit.clamp(22.0, 26.0);
+                }
+            }
+        }
+
+        prev_soft = soft;
+        current_idx += samples_per_bit;
+    }
+
+    // Log the timing drift for diagnostics
+    if (samples_per_bit - SAMPLES_PER_BIT as f32).abs() > 0.05 {
+        debug!("[TED] Clock drift compensated. Final SPB: {:.3} (drift: {:.2} Hz)", 
+               samples_per_bit, 
+               (48000.0 / SAMPLES_PER_BIT as f32) - (48000.0 / samples_per_bit));
+    }
+
+    soft_bits
 }

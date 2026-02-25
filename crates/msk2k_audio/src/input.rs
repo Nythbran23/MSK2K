@@ -63,7 +63,7 @@ impl AudioInput {
     /// Start capturing audio and send samples to the provided channel
     ///
     /// The channel will receive Vec<f32> buffers at the configured sample rate.
-    /// Stereo audio will be downmixed to mono if channels > 1.
+    /// Stereo audio will be converted to mono by extracting only the left channel if channels > 1.
     pub fn start(&mut self, tx: mpsc::UnboundedSender<Vec<AudioSample>>) -> Result<(), InputError> {
         let requested_config = StreamConfig {
             channels: self.config.channels,
@@ -124,9 +124,11 @@ impl AudioInput {
                 let samples = if channels == 1 {
                     data.to_vec()
                 } else {
-                    // Downmix to mono by averaging channels
+                    // EXTRACT LEFT CHANNEL ONLY (Bypass downmixing!)
+                    // Ham radio USB Codecs route the audio to the Left channel.
+                    // Averaging them destroys the MSK phase data.
                     data.chunks(channels)
-                        .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+                        .map(|chunk| chunk[0]) // Grab only the Left channel
                         .collect()
                 };
 
@@ -147,11 +149,9 @@ impl AudioInput {
                     let samples: Vec<f32> = if channels_i16 == 1 {
                         data.iter().map(|&s| s as f32 / 32768.0).collect()
                     } else {
+                        // EXTRACT LEFT CHANNEL ONLY
                         data.chunks(channels_i16)
-                            .map(|chunk| {
-                                chunk.iter().map(|&s| s as f32 / 32768.0).sum::<f32>()
-                                    / channels_i16 as f32
-                            })
+                            .map(|chunk| chunk[0] as f32 / 32768.0) // Grab only the Left channel
                             .collect()
                     };
                     let _ = tx_i16.send(samples);
