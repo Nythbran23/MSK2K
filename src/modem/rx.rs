@@ -71,7 +71,7 @@ pub async fn run_receiver(
 
     let manager = DeviceManager::new().unwrap_or_else(|e| panic!("DeviceManager failed: {}", e));
     let device = if let Some(ref name) = cfg.input_device {
-        log::info!("[RX] Looking for input device: '{}'", name);
+        log::debug!("[RX] Looking for input device: '{}'", name);
         find_nth_device(name, true).unwrap_or_else(|| {
             let (base, _) = parse_device_suffix(name);
             log::warn!("[RX] find_nth_device failed, trying DeviceManager with base='{}' then full='{}'", base, name);
@@ -84,12 +84,13 @@ pub async fn run_receiver(
                 .unwrap()
         })
     } else {
-        log::info!("[RX] No input device configured, using system default");
+        log::debug!("[RX] No input device configured, using system default");
         manager.default_input_device().unwrap()
     };
     log::info!("[RX] Opening Device: {}", device.name().unwrap_or_default());
 
-    let audio_cfg = AudioConfig::new(cfg.sample_rate, 1, cfg.buffer_size);
+    // 🟢 FORCE 2 CHANNELS: This prevents macOS from downmixing L+R and ruining the phase data
+    let audio_cfg = AudioConfig::new(cfg.sample_rate, 2, cfg.buffer_size);
     let mut audio_input = match AudioInputBuilder::new().device(device).config(audio_cfg).build() {
         Ok(ai) => ai,
         Err(e) => { log::error!("[RX] Failed to build AudioInput: {:?}", e); return; }
@@ -147,12 +148,12 @@ pub async fn run_receiver(
                         extractor = MatrixSyncExtractor::new();
 
                         let candidate_count = accumulator.candidate_count();
-                        log::info!("[ACCUM] EndOfPeriod (RX→RX): {} candidates, rx_slot={}", candidate_count, last_audio_rx_slot);
+                        log::debug!("[ACCUM] EndOfPeriod (RX→RX): {} candidates, rx_slot={}", candidate_count, last_audio_rx_slot);
 
                         let utc_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
 
                         if let Some(msg) = accumulator.process() {
-                            log::info!("[ACCUM] ✅ Accumulated decode: '{}' rx_slot={}", msg.text, last_audio_rx_slot);
+                            log::debug!("[ACCUM] ✅ Accumulated decode: '{}' rx_slot={}", msg.text, last_audio_rx_slot);
                             let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
                             let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: last_audio_rx_slot, is_private, is_accumulated: true };
                             let _ = decoded_tx.send(decoded);
@@ -179,12 +180,12 @@ pub async fn run_receiver(
                             extractor = MatrixSyncExtractor::new();
 
                             let candidate_count = accumulator.candidate_count();
-                            log::info!("[ACCUM] PauseAudio: {} candidates, rx_slot={}", candidate_count, last_audio_rx_slot);
+                            log::debug!("[ACCUM] PauseAudio: {} candidates, rx_slot={}", candidate_count, last_audio_rx_slot);
 
                             let utc_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
 
                             if let Some(msg) = accumulator.process() {
-                                log::info!("[ACCUM] ✅ Accumulated decode: '{}' rx_slot={}", msg.text, last_audio_rx_slot);
+                                log::debug!("[ACCUM] ✅ Accumulated decode: '{}' rx_slot={}", msg.text, last_audio_rx_slot);
                                 let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
                                 let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: last_audio_rx_slot, is_private, is_accumulated: true };
                                 let _ = decoded_tx.send(decoded);
@@ -192,12 +193,12 @@ pub async fn run_receiver(
                             accumulator.clear();
                             retained_audio.clear();
 
-                            log::info!("[RX] Audio paused (ALSA device release for TX)");
+                            log::debug!("[RX] Audio paused (ALSA device release for TX)");
                         }
                     },
                     RxConfigUpdate::ResumeAudio => {
                         if audio_paused {
-                            log::info!("[RX] Audio resumed");
+                            log::debug!("[RX] Audio resumed");
                             // Create a fresh audio channel and restart capture
                             let (new_audio_tx, new_audio_rx) = mpsc::unbounded_channel::<Vec<f32>>();
                             audio_chunk_rx = new_audio_rx;
@@ -234,7 +235,7 @@ pub async fn run_receiver(
                             let rms = if diag_sample_count > 0 {
                                 (diag_sum_sq / diag_sample_count as f64).sqrt()
                             } else { 0.0 };
-                            log::info!("🔊 RX AUDIO: rms={:.6}, peak={:.4}, samples={}, chunks={}, candidates={}, decodes={}",
+                            log::debug!("🔊 RX AUDIO: rms={:.6}, peak={:.4}, samples={}, chunks={}, candidates={}, decodes={}",
                                 rms, diag_peak, diag_sample_count, diag_chunk_count,
                                 diag_candidate_count, diag_decode_count);
                             // Reset for next window
@@ -263,7 +264,7 @@ pub async fn run_receiver(
                             // Also try live decode for immediate feedback
                             if let Some(decoded) = decode_candidate(candidate, &cfg, utc_ms, last_audio_rx_slot) {
                                 diag_decode_count += 1; // 🔍 DIAGNOSTIC
-                                log::info!("[LIVE]  ✅ '{}'", decoded.msg.text);
+                                log::debug!("[LIVE]  ✅ '{}'", decoded.msg.text);
                                 let _ = decoded_tx.send(decoded);
                             }
                         }
@@ -287,10 +288,10 @@ pub async fn run_receiver(
 
 fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, rx_slot: u8) -> Option<RxDecoded> {
     let sync = &candidate.sync;
-    log::info!("[DECODE] candidate: sync_bits={} corr={:.3} format_hint={}",
+    log::debug!("[DECODE] candidate: sync_bits={} corr={:.3} format_hint={}",
                sync.sync_bits, sync.correlation, sync.format_hint);
     if sync.sync_bits < 35 && sync.correlation < 0.40 {
-        log::info!("[DECODE] rejected by gate");
+        log::debug!("[DECODE] rejected by gate");
         return None;
     }
     let codec = CallsignCodec::new();
@@ -304,7 +305,7 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
         };
 
         if let Some(pkt) = decode_packet_soft(&candidate.packet_soft, &ts) {
-            log::info!("[DECODE] pkt format={} addr_bits={:?}", pkt.format, &pkt.addr_bits[..8.min(pkt.addr_bits.len())]);
+            log::debug!("[DECODE] pkt format={} addr_bits={:?}", pkt.format, &pkt.addr_bits[..8.min(pkt.addr_bits.len())]);
             let mut msg_res = None;
 
             // 🟢 FORMAT 1: Try both Grid and Standard decode paths
@@ -346,13 +347,13 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
 
             match &msg_res {
                 Some(Ok(msg)) => {
-                    log::info!("[DECODE] msg ok: from='{}' text='{}'", msg.from_call, msg.text);
+                    log::debug!("[DECODE] msg ok: from='{}' text='{}'", msg.from_call, msg.text);
                 }
                 Some(Err(e)) => {
-                    log::info!("[DECODE] msg parse failed: {:?}", e);
+                    log::debug!("[DECODE] msg parse failed: {:?}", e);
                 }
                 None => {
-                    log::info!("[DECODE] msg_res was None");
+                    log::debug!("[DECODE] msg_res was None");
                 }
             }
             if let Some(Ok(msg)) = msg_res {
