@@ -6,6 +6,7 @@ use std::process::Command;
 use crate::engine::{EngineHandle, SlotParity, SlotPeriod, UiCmd, UiEvent};
 use crate::engine::report_calc::report_from_correlation;
 use crate::qso::adif::{AdifLogger, QsoRecord};
+use crate::engine::runtime::is_relevant_audio_device; // 🟢 IMPORTED HERE
 
 pub fn run_gui() -> anyhow::Result<()> {
     let icon_data = include_bytes!("../../assets/MSK2K.png");
@@ -107,9 +108,6 @@ impl Msk2kEguiApp {
         // We use "rigctld -l" because we bundled rigctld, not rigctl.
         // Luckily, rigctld -l produces the exact same list!
         // We also hide the console window on Windows to keep it clean.
-        #[cfg(target_os = "windows")]
-        // 🟢 CROSS-PLATFORM LIST LOADING
-        let rig_cmd = get_bundled_rigctl_path();
         let mut rig_list = Vec::new();
 
         #[cfg(target_os = "windows")]
@@ -1035,6 +1033,11 @@ fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
     
     for d in device_list {
         if let Ok(name) = d.name() {
+            // 🟢 FILTER CPAL DEVICES
+            if !is_relevant_audio_device(&name) {
+                continue;
+            }
+
             let has_in = d.supported_input_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
                 || d.default_input_config().is_ok();
             let has_out = d.supported_output_configs().map(|mut c| c.next().is_some()).unwrap_or(false)
@@ -1052,6 +1055,10 @@ fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
         if let Ok(out) = std::process::Command::new("arecord").arg("-l").output() {
             if let Ok(text) = String::from_utf8(out.stdout) {
                 for alsa_name in parse_alsa_card_list(&text) {
+                    // 🟢 FILTER ARECORD DEVICES
+                    if !is_relevant_audio_device(&alsa_name) {
+                        continue;
+                    }
                     if !known_names.contains(&alsa_name) {
                         log::info!("[AUDIO] Adding ALSA input device missing from cpal: {}", alsa_name);
                         all_devices.push((alsa_name, true, false));
@@ -1064,6 +1071,10 @@ fn enumerate_audio_devices() -> (Vec<String>, Vec<String>) {
         if let Ok(out) = std::process::Command::new("aplay").arg("-l").output() {
             if let Ok(text) = String::from_utf8(out.stdout) {
                 for alsa_name in parse_alsa_card_list(&text) {
+                    // 🟢 FILTER APLAY DEVICES
+                    if !is_relevant_audio_device(&alsa_name) {
+                        continue;
+                    }
                     // Check if we already have this device (maybe added from arecord)
                     if let Some(entry) = all_devices.iter_mut().find(|(n, _, _)| n == &alsa_name) {
                         entry.2 = true; // Mark as also having output

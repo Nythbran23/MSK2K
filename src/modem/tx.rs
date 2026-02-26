@@ -14,7 +14,7 @@ use std::f32::consts::PI;
 use crate::modem::TxRequest;
 
 const SYMBOL_RATE: u32 = 2_000;
-const CENTER_FREQ: f32 = 1500.0;
+const CENTER_FREQ: f32 = 1350.0;
 const FREQ_DEV: f32 = 500.0;
 
 const GENERAL_ADDRESS_49: [i32; 49] = [

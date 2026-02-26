@@ -34,7 +34,7 @@ pub struct RxSync {
 pub fn modulate_48k(bits: &[i32]) -> Vec<f32> {
     const SAMPLE_RATE: f32 = 48_000.0;
     const BIT_RATE: f32 = 2_000.0;
-    const CARRIER_HZ: f32 = 1_496.1;
+    const CARRIER_HZ: f32 = 1_350.0;
 
     let samples_per_bit = (SAMPLE_RATE / BIT_RATE) as usize; // 24
     if bits.is_empty() || samples_per_bit == 0 {

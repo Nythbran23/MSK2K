@@ -17,6 +17,30 @@ use crate::modem::{run_transmitter_task, RxAudioCfg, RxConfigUpdate, RxDecoded, 
 use crate::proto::{self, render_payload, Format, RxEnvelope};
 use crate::qso::{Action, EngineEvent, Intent, QsoEngine, QsoState};
 
+/// A wrapper that ensures the external process is cleanly killed when the app closes
+/// or when the process is replaced.
+pub struct ProcessGuard(pub Child);
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        log::info!("[LAUNCHER] Drop guard triggered, shutting down rigctld (pid={})", self.0.id());
+        
+        // Release PTT cleanly via TCP before killing
+        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:4532".parse().unwrap(),
+            std::time::Duration::from_millis(500),
+        ) {
+            use std::io::Write;
+            let _ = stream.write_all(b"T 0\n");
+            let _ = stream.flush();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        
+        let _ = self.0.kill();
+        let _ = self.0.wait(); // Reaps the process to prevent OS zombies
+    }
+}
+
 pub fn start() -> EngineHandle {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let (cmds, cmd_rx) = mpsc::unbounded_channel::<UiCmd>();
@@ -163,6 +187,7 @@ fn get_rigctld_path() -> String {
     log::info!("[LAUNCHER] Using system rigctld (not bundled)");
     binary_name.to_string()
 }
+
 async fn run_runtime(
     mut cmd_rx: mpsc::UnboundedReceiver<UiCmd>,
     evt_tx: mpsc::UnboundedSender<UiEvent>,
@@ -223,8 +248,8 @@ async fn run_runtime(
     let (ham_update_tx, mut ham_update_rx) = mpsc::unbounded_channel();
     let mut hamlib: Option<HamlibClient> = None;
 
-    // 🟢 2. Initialize Launcher Process Holder
-    let mut rigctld_process: Option<Child> = None;
+    // 🟢 2. Initialize Launcher Process Holder (Using the Drop Guard!)
+    let mut rigctld_process: Option<ProcessGuard> = None;
     let mut launched_rig_model: String = String::new();
     let mut launched_serial_port: String = String::new();
     let mut launched_baud_rate: u32 = 0;
@@ -287,7 +312,10 @@ async fn run_runtime(
                 launched_rig_model = current_rig_model.clone();
                 launched_serial_port = current_rig_port.clone();
                 launched_baud_rate = baud;
-                rigctld_process = Some(c);
+                
+                // Wrap in our drop guard
+                rigctld_process = Some(ProcessGuard(c));
+                
                 // Give rigctld time to bind port 4532
                 std::thread::sleep(std::time::Duration::from_millis(800));
                 // Now connect Hamlib TCP client
@@ -523,11 +551,12 @@ async fn run_runtime(
                             && launched_serial_port == serial_port
                             && launched_baud_rate == baud_rate
                         {
-                            if let Some(ref mut child) = rigctld_process {
-                                match child.try_wait() {
+                            if let Some(ref mut guard) = rigctld_process {
+                                match guard.0.try_wait() {
                                     Ok(Some(_status)) => {
                                         log::warn!("[LAUNCHER] rigctld had exited — will re-launch");
-                                        rigctld_process = None;
+                                        // Setting to None will drop the dead guard
+                                        rigctld_process = None; 
                                     }
                                     Ok(None) => {
                                         log::info!("[LAUNCHER] rigctld already running with same config — skipping");
@@ -542,23 +571,13 @@ async fn run_runtime(
                         }
 
                         if !skip_launch {
-                            // Kill old process first — release PTT cleanly via TCP before killing
-                            if let Some(mut child) = rigctld_process.take() {
-                                log::info!("[LAUNCHER] Releasing PTT and killing old rigctld (pid={})", child.id());
-                                // Send PTT off via TCP before killing the process
-                                if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-                                    &"127.0.0.1:4532".parse().unwrap(),
-                                    std::time::Duration::from_millis(500),
-                                ) {
-                                    use std::io::Write;
-                                    let _ = stream.write_all(b"T 0\n");
-                                    let _ = stream.flush();
-                                    std::thread::sleep(std::time::Duration::from_millis(200));
-                                }
-                                let _ = child.kill();
-                                let _ = child.wait();
+                            // Kill old process first by dropping the guard!
+                            if rigctld_process.is_some() {
+                                log::info!("[LAUNCHER] Dropping old rigctld process...");
+                                rigctld_process = None; // This triggers Drop, releases PTT, kills, and waits automatically!
                                 std::thread::sleep(std::time::Duration::from_millis(500));
                             }
+                            
                             launched_rig_model.clear();
                             launched_serial_port.clear();
                             launched_baud_rate = 0;
@@ -596,7 +615,9 @@ async fn run_runtime(
                                 match cmd.spawn() {
                                     Ok(c) => {
                                         log::info!("[LAUNCHER] rigctld started (pid={})", c.id());
-                                        rigctld_process = Some(c);
+                                        // Wrap new process in drop guard
+                                        rigctld_process = Some(ProcessGuard(c));
+                                        
                                         launched_rig_model = rig_model;
                                         launched_serial_port = serial_port;
                                         launched_baud_rate = baud_rate;
@@ -924,22 +945,8 @@ async fn run_runtime(
         }
     }
     
-    // Cleanup: release PTT and kill rigctld on exit
-    if let Some(mut child) = rigctld_process.take() {
-        log::info!("[LAUNCHER] Shutting down rigctld (pid={})", child.id());
-        // Release PTT cleanly via TCP before killing
-        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-            &"127.0.0.1:4532".parse().unwrap(),
-            std::time::Duration::from_millis(500),
-        ) {
-            use std::io::Write;
-            let _ = stream.write_all(b"T 0\n");
-            let _ = stream.flush();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    // Explicitly drop the guard on exit (this ensures Rigctld is cleanly killed before returning)
+    drop(rigctld_process);
     
     Ok(())
 }
@@ -997,12 +1004,34 @@ fn process_qso_events(
             EngineEvent::Info(msg) => {
                 let _ = evt_tx.send(UiEvent::Info(msg.clone()));
             }
-            //EngineEvent::Tx(tx_env) => {
-                //let _ = evt_tx.send(UiEvent::TxText {
-                    //text: tx_env.raw.clone(),
-               // });
-            //}
             _ => {}
         }
     }
+}
+
+// ─── AUDIO FILTER HELPER ───
+
+/// Use this helper inside app.rs (e.g. `crate::engine::runtime::is_relevant_audio_device(name)`)
+/// when fetching the list of devices to populate the UI dropdowns. It hides ALSA spam.
+pub fn is_relevant_audio_device(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    
+    // Always keep standard system defaults and BlackHole loops
+    if lower == "default" || lower.contains("blackhole") {
+        return true;
+    }
+
+    // Blacklist internal ALSA routing / pseudo-devices
+    let blacklist = [
+        "sysdefault:", "front:", "surround", "center_lfe", 
+        "iec958", "spdif", "dmix", "dsnoop", "dshare", "hw:", "plughw:", "samplerate"
+    ];
+
+    for blocked in blacklist.iter() {
+        if lower.starts_with(blocked) {
+            return false;
+        }
+    }
+    
+    true
 }

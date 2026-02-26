@@ -29,7 +29,7 @@ use crate::{fmt1, fmt2};
 
 const SAMPLE_RATE: f32 = 48_000.0;
 /// MSK144 / MSK2K center frequency
-const CARRIER_HZ: f32 = 1500.0;
+const CARRIER_HZ: f32 = 1350.0;
 
 const SAMPLES_PER_BIT: usize = 24; // 48000 / 2000
 pub const PACKET_BITS:  usize = 258;
@@ -115,7 +115,7 @@ pub fn demodulate_msk_delay_multiply(audio_window: &[f32]) -> Vec<f32> {
     let mut baseband = vec![num_complex::Complex32::new(0.0, 0.0); n];
     
     // 1. Downconvert to complex baseband (MSK144/MSK2K center frequency = 1500 Hz)
-    let step = 2.0 * std::f32::consts::PI * 1500.0 / 48000.0;
+    let step = 2.0 * std::f32::consts::PI * CARRIER_HZ / 48000.0;
     for i in 0..n {
         let phase = step * i as f32;
         let i_val = audio_window[i] * phase.cos();
