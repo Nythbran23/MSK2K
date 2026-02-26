@@ -813,12 +813,28 @@ async fn run_runtime(
                         running = false;
                         if let Some(h) = &hamlib { h.set_ptt(false); }
                         if tx_active { tx_active = false; let _ = evt_tx.send(UiEvent::TxActive(false)); }
+                        
+                        // 🟢 WIPE BACKEND STATE: Forget the active target
+                        qso_engine.set_their_call(None);
+                        
                         let (_, events) = qso_engine.on_intent(Intent::Abort);
                         process_qso_events(&events, &evt_tx, &rx_config_tx);
+                        
                         observed_remote_slot = None;
                         was_calling_cq = false;
+                        
+                        // 🟢 WIPE RX MEMORY: Tell accumulator to drop the old callsign
+                        update_rx_config(&rx_config_tx, RxConfigUpdate::TheirCall(None));
+                        
                         if let Some(st) = rx_stop_tx.take() { let _ = st.send(()); }
                         let _ = tx_req_tx.send(TxRequest::Stop);
+                        
+                        // 🟢 WIPE UI STATE: Force the UI to reset back to Idle
+                        let _ = evt_tx.send(UiEvent::TheirCallChanged { 
+                            callsign: String::new(), 
+                            grid: None 
+                        });
+                        let _ = evt_tx.send(UiEvent::State("Idle".to_string()));
                         let _ = evt_tx.send(UiEvent::Info("STOPPED".into()));
                     }
                     _ => {}

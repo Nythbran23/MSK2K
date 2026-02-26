@@ -22,7 +22,7 @@ pub fn run_gui() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 600.0])
-            .with_min_inner_size([500.0, 250.0])
+            .with_min_inner_size([750.0, 400.0])
             .with_icon(icon),
         ..Default::default()
     };
@@ -303,6 +303,7 @@ impl Msk2kEguiApp {
                     if s.contains("LISTEN") || s.contains("Listening") { self.is_listening = true; self.is_calling_cq = false; self.in_active_qso = false; }
                     else if s.contains("CALLING_CQ") || s.contains("CallingCq") || s.contains("CQ mode") { self.is_listening = false; self.is_calling_cq = true; self.in_active_qso = false; }
                     else if s.contains("SEND_") || s.contains("CALLING_STN") || s.contains("Sending") || s.contains("CallingStn") { self.is_listening = false; self.is_calling_cq = false; self.in_active_qso = true; }
+                    else { self.is_listening = false; self.is_calling_cq = false; self.in_active_qso = false; }
                 }
                 UiEvent::TheirCallChanged { callsign, grid } => { 
                     self.their_call = callsign.clone(); 
@@ -733,7 +734,7 @@ impl eframe::App for Msk2kEguiApp {
                     let _ = self.engine.cmds.send(UiCmd::CallStation { my_call: self.my_call.clone(), their_call: t });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⏹ STOP").clicked() { self.their_call = String::new(); self.is_calling_cq = false; self.is_listening = false; let _ = self.engine.cmds.send(UiCmd::Stop); }
+                    if ui.button("⏹ STOP").clicked() { self.their_call = String::new(); self.is_calling_cq = false; self.is_listening = false; self.in_active_qso = false; let _ = self.engine.cmds.send(UiCmd::Stop); }
                     if self.in_active_qso || !self.their_call.is_empty() {
                         ui.add_space(10.0);
                         let green = egui::Color32::from_rgb(56, 120, 70);
