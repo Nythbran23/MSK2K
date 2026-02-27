@@ -18,7 +18,7 @@
 
 use std::f32::consts::PI;
 use std::collections::VecDeque;
-use log::{info, debug};
+use log::{debug};
 use num_complex::Complex32;
 
 use crate::{fmt1, fmt2};
@@ -149,7 +149,7 @@ pub fn demodulate_msk_delay_multiply(audio_window: &[f32]) -> Vec<f32> {
         sq_sum += val * val;
     }
     let rms = (sq_sum / n as f32).sqrt();
-    info!("[DSP] audio_window: n={}, soft_rms_pre_agc={:.6}", n, rms);
+    debug!("[DSP] audio_window: n={}, soft_rms_pre_agc={:.6}", n, rms);
     if rms > 1e-6 {
         let gain = 1.0 / rms;
         for val in &mut soft_stream {
@@ -381,7 +381,7 @@ impl MatrixSyncExtractor {
             let sep_ok = self.f1_last_peak_sample
                 .map(|last| eval.end_sample > last + EVAL_STRIDE_SAMPLES as u64 / 2)
                 .unwrap_or(true);
-                info!("[SYN] F1 Peak Candidate: tau={}, corr={:.3}, pol={}, sep_ok={}", 
+                debug!("[SYN] F1 Peak Candidate: tau={}, corr={:.3}, pol={}, sep_ok={}", 
                   eval.offset, eval.corr_abs, eval.polarity, sep_ok);
             if sep_ok {
                 self.f1_last_peak_sample = Some(eval.end_sample);
@@ -393,7 +393,7 @@ impl MatrixSyncExtractor {
             let sep_ok = self.f2_last_peak_sample
                 .map(|last| eval.end_sample > last + EVAL_STRIDE_SAMPLES as u64 / 2)
                 .unwrap_or(true);
-                info!("[SYN] F2 Peak Candidate: tau={}, corr={:.3}, shift={}, rot={}, pol={}, sep_ok={}", 
+                debug!("[SYN] F2 Peak Candidate: tau={}, corr={:.3}, shift={}, rot={}, pol={}, sep_ok={}", 
                   eval.offset, eval.corr_abs, eval.sync_shift, eval.sync_rotation, eval.polarity, sep_ok);
             if sep_ok {
                 self.f2_last_peak_sample = Some(eval.end_sample);

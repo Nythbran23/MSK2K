@@ -334,7 +334,7 @@ async fn run_runtime(
                 diag_tick += 1;
                 // 🔍 DIAGNOSTIC: Log heartbeat every ~10 seconds
                 if diag_tick % 200 == 0 {
-                    log::info!("💓 HEARTBEAT: state={}, running={}, rx_config_tx={}, rx_stop_tx={}, their_call={:?}, observed_slot={:?}",
+                    log::debug!("💓 HEARTBEAT: state={}, running={}, rx_config_tx={}, rx_stop_tx={}, their_call={:?}, observed_slot={:?}",
                         qso_engine.state, running,
                         rx_config_tx.is_some(), rx_stop_tx.is_some(),
                         qso_engine.their_call, observed_remote_slot);
