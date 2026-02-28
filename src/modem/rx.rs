@@ -82,7 +82,7 @@ pub async fn run_receiver(
                     manager.default_input_device()
                 })
                 .unwrap()
-        })
+            })
     } else {
         log::debug!("[RX] No input device configured, using system default");
         manager.default_input_device().unwrap()
@@ -118,7 +118,10 @@ pub async fn run_receiver(
 
     loop {
         tokio::select! {
-            _ = stop_rx.recv() => { break; }
+            _ = stop_rx.recv() => { 
+                log::info!("🛑 [RX TASK] Stop signal received, breaking loop to release audio...");
+                break; 
+            }
             Some(update) = config_rx.recv() => {
                 match update {
                     RxConfigUpdate::TheirCall(tc) => {
@@ -163,12 +166,9 @@ pub async fn run_receiver(
                     },
                     RxConfigUpdate::PauseAudio => {
                         if !audio_paused {
-                            // Audio is stopping — this is the definitive end of the RX period.
-                            // All audio in the accumulator was received during last_audio_rx_slot.
                             audio_input.stop();
                             audio_paused = true;
 
-                            // Drain any final buffered audio chunks
                             while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
                                 for s in &mut chunk { *s *= 0.5; }
                                 retained_audio.extend_from_slice(&chunk);
@@ -199,7 +199,6 @@ pub async fn run_receiver(
                     RxConfigUpdate::ResumeAudio => {
                         if audio_paused {
                             log::debug!("[RX] Audio resumed");
-                            // Create a fresh audio channel and restart capture
                             let (new_audio_tx, new_audio_rx) = mpsc::unbounded_channel::<Vec<f32>>();
                             audio_chunk_rx = new_audio_rx;
                             if let Err(e) = audio_input.start(new_audio_tx) {
@@ -221,7 +220,6 @@ pub async fn run_receiver(
                         // Record the slot parity while audio is flowing — this is ground truth
                         last_audio_rx_slot = ((utc_ms as u64 / period_ms) % 2) as u8;
 
-                        // 🔍 DIAGNOSTIC: Measure audio levels BEFORE any processing
                         for s in &chunk {
                             diag_sum_sq += (*s as f64) * (*s as f64);
                             let abs = s.abs();
@@ -230,7 +228,6 @@ pub async fn run_receiver(
                         diag_sample_count += chunk.len() as u64;
                         diag_chunk_count += 1;
                         
-                        // Log every ~5 seconds (approx 240 chunks at 48kHz/1024)
                         if diag_chunk_count % 240 == 0 {
                             let rms = if diag_sample_count > 0 {
                                 (diag_sum_sq / diag_sample_count as f64).sqrt()
@@ -238,7 +235,6 @@ pub async fn run_receiver(
                             log::debug!("🔊 RX AUDIO: rms={:.6}, peak={:.4}, samples={}, chunks={}, candidates={}, decodes={}",
                                 rms, diag_peak, diag_sample_count, diag_chunk_count,
                                 diag_candidate_count, diag_decode_count);
-                            // Reset for next window
                             diag_sample_count = 0;
                             diag_sum_sq = 0.0;
                             diag_peak = 0.0;
@@ -256,14 +252,10 @@ pub async fn run_receiver(
 
                         let candidates = extractor.push_audio(&chunk);
                         for candidate in &candidates {
-                            diag_candidate_count += 1; // 🔍 DIAGNOSTIC
-                            
-                            // Always add to accumulator for end-of-period processing
+                            diag_candidate_count += 1;
                             accumulator.add(candidate.clone());
-                            
-                            // Also try live decode for immediate feedback
                             if let Some(decoded) = decode_candidate(candidate, &cfg, utc_ms, last_audio_rx_slot) {
-                                diag_decode_count += 1; // 🔍 DIAGNOSTIC
+                                diag_decode_count += 1;
                                 log::debug!("[LIVE]  ✅ '{}'", decoded.msg.text);
                                 let _ = decoded_tx.send(decoded);
                             }
@@ -272,7 +264,6 @@ pub async fn run_receiver(
                         if retained_audio.len() > max_retain_samples { retained_audio.clear(); }
                     }
                     None => {
-                        // Audio channel closed — if paused, this is expected, just wait for config updates
                         if audio_paused {
                             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         } else {
@@ -284,6 +275,7 @@ pub async fn run_receiver(
         }
     }
     audio_input.stop();
+    log::info!("🛑 [RX TASK] Audio input stopped, task completely exited.");
 }
 
 fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, rx_slot: u8) -> Option<RxDecoded> {
@@ -308,15 +300,11 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
             log::debug!("[DECODE] pkt format={} addr_bits={:?}", pkt.format, &pkt.addr_bits[..8.min(pkt.addr_bits.len())]);
             let mut msg_res = None;
 
-            // 🟢 FORMAT 1: Try both Grid and Standard decode paths
             if pkt.format == 1 {
                 let is_general = is_general_addr(&pkt.addr_bits);
-                // Type field at bit positions 54,55 (0-indexed)
-                // [1,1] = Type 11 (CQ+Grid), [0,1] = Type 01 (Standard CQ/directed)
                 let b55 = pkt.info_bits.get(55).unwrap_or(&0);
                 let b56 = pkt.info_bits.get(56).unwrap_or(&0);
                 
-                // 🟢 TRY 1: If type bits suggest Grid CQ, try grid decode first
                 if is_general && *b55 == 1 && *b56 == 1 {
                     if let Ok(grid_text) = codec.decode_cq_with_grid(&pkt.info_bits) {
                         let parts: Vec<&str> = grid_text.split_whitespace().collect();
@@ -334,13 +322,10 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
                     }
                 }
                 
-                // 🟢 TRY 2: If grid decode didn't produce a result, try standard decode
-                // This handles: standard CQ, directed calls, AND grid CQ with decode errors
                 if msg_res.is_none() {
                     msg_res = Some(Message::from_format1_bits(&codec, &pkt.info_bits, &pkt.addr_bits, is_general, Some(&cfg.my_call)));
                 }
             } 
-            // 🟢 FORMAT 2: Short messages
             else if pkt.format == 2 {
                 msg_res = Some(Message::from_format2_bits(&codec, &pkt.info_bits, &pkt.addr_bits, &cfg.my_call, cfg.their_call.as_deref().unwrap_or("")));
             }
@@ -409,7 +394,6 @@ fn find_nth_device(display_name: &str, _is_input: bool) -> Option<cpal::Device> 
     
     log::info!("[RX] Resolving input device: '{}' (base='{}', suffix='{}')", display_name, base_name, suffix);
     
-    // Strategy 1: Try input_devices() first — most reliable on all platforms for RX
     if let Ok(devs) = host.input_devices() {
         for dev in devs {
             if let Ok(name) = dev.name() {
@@ -423,7 +407,6 @@ fn find_nth_device(display_name: &str, _is_input: bool) -> Option<cpal::Device> 
     
     log::info!("[RX] Not found in input_devices(), trying host.devices()...");
     
-    // Strategy 2: Try host.devices() with capability detection (macOS path)
     if let Ok(devs) = host.devices() {
         let dev_list: Vec<cpal::Device> = devs.collect();
         if !dev_list.is_empty() {
@@ -479,8 +462,6 @@ fn find_nth_device(display_name: &str, _is_input: bool) -> Option<cpal::Device> 
 }
 
 fn parse_device_suffix(display_name: &str) -> (String, String) {
-    // Only match suffixes WE added: (RX), (TX), (RX/TX), or (N) where N is a number
-    // Windows device names like "Speakers (2- USB Audio CODEC )" must NOT be split
     if let Some(pos) = display_name.rfind(" (") {
         if display_name.ends_with(')') {
             let suffix = display_name[pos+2..display_name.len()-1].trim();
@@ -489,6 +470,5 @@ fn parse_device_suffix(display_name: &str) -> (String, String) {
             }
         }
     }
-    // No known suffix — the entire string is the device name
     (display_name.to_string(), String::new())
 }

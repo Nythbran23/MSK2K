@@ -203,6 +203,9 @@ async fn run_runtime(
     let (rx_decoded_tx, mut rx_decoded_rx) = mpsc::unbounded_channel::<RxDecoded>();
     let mut rx_stop_tx: Option<mpsc::UnboundedSender<()>> = None;
     let mut rx_config_tx: Option<mpsc::UnboundedSender<RxConfigUpdate>> = None;
+    
+    // 🟢 TASK TRACKER: This guarantees we wait for the old RX task to fully die before starting a new one
+    let mut rx_task: Option<tokio::task::JoinHandle<()>> = None; 
 
     // LOAD CONFIG
     let saved_cfg = load_config();
@@ -248,14 +251,14 @@ async fn run_runtime(
     let (ham_update_tx, mut ham_update_rx) = mpsc::unbounded_channel();
     let mut hamlib: Option<HamlibClient> = None;
 
-    // 🟢 2. Initialize Launcher Process Holder (Using the Drop Guard!)
+    // Initialize Launcher Process Holder
     let mut rigctld_process: Option<ProcessGuard> = None;
     let mut launched_rig_model: String = String::new();
     let mut launched_serial_port: String = String::new();
     let mut launched_baud_rate: u32 = 0;
 
 
-    // 🟢 AUTO-START: If valid config exists, start LISTENING immediately.
+    // AUTO-START: If valid config exists, start LISTENING immediately.
     if !qso_engine.my_call.is_empty() && input_device.is_some() {
         log::info!("⚡ Auto-starting RX with saved configuration...");
 
@@ -282,7 +285,7 @@ async fn run_runtime(
         ));
     }
 
-    // 🟢 AUTO-START HAMLIB: If saved config has rig model + port, launch rigctld once at startup
+    // AUTO-START HAMLIB: If saved config has rig model + port, launch rigctld once at startup
     if !current_rig_model.is_empty() && !current_rig_port.is_empty() {
         let baud: u32 = current_rig_baud.parse().unwrap_or(19200);
         log::info!("[LAUNCHER] Auto-starting rigctld from saved config: model={} port={} baud={}", 
@@ -332,15 +335,13 @@ async fn run_runtime(
                 if !running { continue; }
 
                 diag_tick += 1;
-                // 🔍 DIAGNOSTIC: Log heartbeat every ~10 seconds
                 if diag_tick % 200 == 0 {
-                    log::debug!("💓 HEARTBEAT: state={}, running={}, rx_config_tx={}, rx_stop_tx={}, their_call={:?}, observed_slot={:?}",
+                    log::info!("💓 HEARTBEAT: state={}, running={}, rx_config_tx={}, rx_stop_tx={}, their_call={:?}, observed_slot={:?}",
                         qso_engine.state, running,
                         rx_config_tx.is_some(), rx_stop_tx.is_some(),
                         qso_engine.their_call, observed_remote_slot);
                 }
 
-                // 🟢 Poll rig frequency every ~5 seconds
                 if diag_tick % 20 == 0 {
                     if let Some(h) = &hamlib { h.refresh(); }
                 }
@@ -365,8 +366,9 @@ async fn run_runtime(
 
                 let should_tx = is_tx_state && (slot == my_tx_slot);
 
+                // 🟢 RESTART TRIGGERED HERE
                 if rx_needs_restart && !qso_engine.my_call.is_empty() {
-                    restart_rx(&rx_decoded_tx, &mut rx_stop_tx, &mut rx_config_tx, RxAudioCfg {
+                    restart_rx(&rx_decoded_tx, &mut rx_stop_tx, &mut rx_config_tx, &mut rx_task, RxAudioCfg {
                         input_device: input_device.clone(),
                         sample_rate,
                         buffer_size,
@@ -377,7 +379,7 @@ async fn run_runtime(
                         my_tx_slot,
                         rx_slot_override: observed_remote_slot,
                         listen_all_slots: true,
-                    });
+                    }).await;
                     rx_needs_restart = false;
                 }
 
@@ -385,7 +387,6 @@ async fn run_runtime(
                     last_slot_index = Some(sidx);
 
                     if should_tx {
-                        // RX→TX: PauseAudio will drain remaining audio and run accumulation
                         if let Some(h) = &hamlib { h.set_ptt(true); }
                         if !tx_active { 
                             tx_active = true; 
@@ -393,10 +394,7 @@ async fn run_runtime(
                             log::info!("⏱️ RX→TX: pausing audio, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
                         }
 
-                        // 🟢 LINUX FIX: Pause audio capture (not the RX task) so ALSA device is free for output
-                        // PauseAudio also triggers accumulation processing using the correct rx_slot
                         update_rx_config(&rx_config_tx, RxConfigUpdate::PauseAudio);
-                        // Give ALSA time to fully release the device handle
                         std::thread::sleep(std::time::Duration::from_millis(500));
 
                         if let Some(payload) = qso_engine.next_tx() {
@@ -415,11 +413,9 @@ async fn run_runtime(
                                 }
                             }
 
-                            // 🟢 THE ARCHITECTURAL SHIFT
                             let rendered = render_payload(&final_payload);
                             match rendered {
                                 Rendered::Bits(bits) => {
-                                    // Bypasses string-to-base37 encoder
                                     let _ = tx_req_tx.send(TxRequest::RawBits {
                                         bits,
                                         slot_len_ms: slen as u32,
@@ -429,7 +425,6 @@ async fn run_runtime(
                                     let _ = evt_tx.send(UiEvent::TxText { text: format!("CQ de {} [GRID]", qso_engine.my_call) });
                                 }
                                 Rendered::Text(raw) => {
-                                    // Standard Base-37 path
                                     let _ = tx_req_tx.send(TxRequest::Text {
                                         rendered: raw.clone(),
                                         slot_len_ms: slen as u32,
@@ -440,8 +435,6 @@ async fn run_runtime(
                                 }
                             }
 
-                            // 🟢 Check if QSO complete after transmission
-                            // Note: next_tx() already increments tx_repeat_count, don't do it again!
                             if qso_engine.state == QsoState::Sending73 {
                                 let max_73_repeats = 5;
 
@@ -453,25 +446,22 @@ async fn run_runtime(
                                     let _ = evt_tx.send(UiEvent::Info(format!("✓ QSO with {} complete", their)));
                                     let _ = evt_tx.send(UiEvent::TheirCallChanged { 
                                         callsign: String::new(),
-                                        grid: None, // 🟢 NEW
+                                        grid: None,
                                     });
 
                                     if was_calling_cq {
                                         let (_, ev2) = qso_engine.on_intent(Intent::Cq);
                                         process_qso_events(&ev2, &evt_tx, &rx_config_tx);
                                         
-                                        // 🟢 CRITICAL FIX: Must keep running=true!
-                                        // running is already true, just reset slot tracking
                                         last_slot_index = None;
                                         observed_remote_slot = None;
                                     } else {
                                         let (_, ev2) = qso_engine.on_intent(Intent::Listen);
                                         process_qso_events(&ev2, &evt_tx, &rx_config_tx);
                                         
-                                        // Keep running for listen mode too
                                         observed_remote_slot = None;
                                     }
-                                    // Free-run receiver: listen on all slots until next QSO locks it
+                                    
                                     update_rx_config(&rx_config_tx, RxConfigUpdate::SlotTiming {
                                         my_tx_slot: 0,
                                         rx_slot_override: None,
@@ -483,19 +473,16 @@ async fn run_runtime(
                             }
                         }
                     }
-                        else {
+                    else {
                         // RX slot boundary
                         if tx_active {
-                            // TX→RX transition: release PTT and resume audio capture
                             if let Some(h) = &hamlib { h.set_ptt(false); }
                             tx_active = false;
                             let _ = evt_tx.send(UiEvent::TxActive(false));
                             log::info!("⏱️ TX→RX: resuming audio, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
                             
-                            // Resume audio capture on the RX task
                             update_rx_config(&rx_config_tx, RxConfigUpdate::ResumeAudio);
                         } else {
-                            // RX→RX transition: process accumulation from previous RX period
                             log::info!("⏱️ RX→RX: EndOfPeriod, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
                             if let Some(tx) = &rx_config_tx {
                                 let _ = tx.send(RxConfigUpdate::EndOfPeriod);
@@ -537,14 +524,11 @@ async fn run_runtime(
                         }
                     }
 
-                    // 2. Configure Launcher
                     UiCmd::ConfigureLauncher { enable_launcher, rig_model, serial_port, baud_rate } => {
-                        // Track rig settings for config save (don't overwrite with empty/zero values)
                         if !rig_model.is_empty() { current_rig_model = rig_model.clone(); }
                         if !serial_port.is_empty() { current_rig_port = serial_port.clone(); }
                         if baud_rate > 0 { current_rig_baud = baud_rate.to_string(); }
 
-                        // Check if same config is already running (skip re-launch)
                         let mut skip_launch = false;
                         if enable_launcher && !serial_port.is_empty()
                             && launched_rig_model == rig_model
@@ -555,7 +539,6 @@ async fn run_runtime(
                                 match guard.0.try_wait() {
                                     Ok(Some(_status)) => {
                                         log::warn!("[LAUNCHER] rigctld had exited — will re-launch");
-                                        // Setting to None will drop the dead guard
                                         rigctld_process = None; 
                                     }
                                     Ok(None) => {
@@ -571,10 +554,9 @@ async fn run_runtime(
                         }
 
                         if !skip_launch {
-                            // Kill old process first by dropping the guard!
                             if rigctld_process.is_some() {
                                 log::info!("[LAUNCHER] Dropping old rigctld process...");
-                                rigctld_process = None; // This triggers Drop, releases PTT, kills, and waits automatically!
+                                rigctld_process = None; 
                                 std::thread::sleep(std::time::Duration::from_millis(500));
                             }
                             
@@ -583,10 +565,8 @@ async fn run_runtime(
                             launched_baud_rate = 0;
 
                             if enable_launcher && !serial_port.is_empty() {
-                                // 🟢 LINUX FIX: Suppress DTR/RTS before rigctld opens the serial port
                                 #[cfg(target_os = "linux")]
                                 {
-                                    log::info!("[LAUNCHER] Pre-configuring {} to suppress DTR/RTS", serial_port);
                                     let stty_result = Command::new("stty")
                                         .args(&["-F", &serial_port, "-hupcl", "-crtscts", &baud_rate.to_string()])
                                         .output();
@@ -615,13 +595,11 @@ async fn run_runtime(
                                 match cmd.spawn() {
                                     Ok(c) => {
                                         log::info!("[LAUNCHER] rigctld started (pid={})", c.id());
-                                        // Wrap new process in drop guard
                                         rigctld_process = Some(ProcessGuard(c));
                                         
                                         launched_rig_model = rig_model;
                                         launched_serial_port = serial_port;
                                         launched_baud_rate = baud_rate;
-                                        // Give rigctld time to open port and bind TCP 4532
                                         std::thread::sleep(std::time::Duration::from_millis(800));
                                     }
                                     Err(e) => log::error!("[LAUNCHER] Failed to start: {}", e),
@@ -666,7 +644,6 @@ async fn run_runtime(
                             });
                         }
                         
-                        // Release PTT if we were transmitting
                         if tx_active {
                             if let Some(h) = &hamlib { h.set_ptt(false); }
                             tx_active = false;
@@ -683,7 +660,6 @@ async fn run_runtime(
                         was_calling_cq = false;
                         rx_needs_restart = true;
                         
-                        // 🟢 CRITICAL FIX: Initialize audio output
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
                             output_device: output_device.clone(),
                             output_level,
@@ -711,7 +687,6 @@ async fn run_runtime(
                         was_calling_cq = true;
                         rx_needs_restart = true;
                         
-                        // 🟢 CRITICAL FIX: Initialize TX audio output!
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
                             output_device: output_device.clone(),
                             output_level,
@@ -737,7 +712,6 @@ async fn run_runtime(
                         was_calling_cq = true;
                         rx_needs_restart = true;
                         
-                        // 🟢 CRITICAL FIX: Initialize TX audio output!
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
                             output_device: output_device.clone(),
                             output_level,
@@ -756,7 +730,7 @@ async fn run_runtime(
                         process_qso_events(&events, &evt_tx, &rx_config_tx);
                         let _ = evt_tx.send(UiEvent::TheirCallChanged { 
                             callsign: tc.clone(),
-                            grid: None, // 🟢 NEW: No grid when manually calling
+                            grid: None,
                         });
 
                         running = true;
@@ -791,7 +765,7 @@ async fn run_runtime(
                         let (_, events) = qso_engine.on_intent(Intent::AnswerCq { 
                             their: tc.clone(), 
                             rpt,
-                            grid: grid.clone(), // 🟢 NEW: Pass grid to QSO engine
+                            grid: grid.clone(),
                         });
                         process_qso_events(&events, &evt_tx, &rx_config_tx);
 
@@ -809,30 +783,30 @@ async fn run_runtime(
                         rx_needs_restart = true;
                     }
 
+                    // 🟢 THIS BLOCK HAS BEEN MASSIVELY IMPROVED
                     UiCmd::Stop => {
+                        log::info!("🛑 UI STOP COMMAND RECEIVED - Terminating background tasks...");
                         running = false;
                         if let Some(h) = &hamlib { h.set_ptt(false); }
                         if tx_active { tx_active = false; let _ = evt_tx.send(UiEvent::TxActive(false)); }
                         
-                        // 🟢 WIPE BACKEND STATE: Forget the active target
                         qso_engine.set_their_call(None);
-                        
                         let (_, events) = qso_engine.on_intent(Intent::Abort);
                         process_qso_events(&events, &evt_tx, &rx_config_tx);
                         
                         observed_remote_slot = None;
                         was_calling_cq = false;
                         
-                        // 🟢 WIPE RX MEMORY: Tell accumulator to drop the old callsign
-                        update_rx_config(&rx_config_tx, RxConfigUpdate::TheirCall(None));
+                        // KILL THE RX TASK AND DROP ITS CONFIG SENDER SO IT STAYS DEAD
+                        if let Some(st) = rx_stop_tx.take() { 
+                            let _ = st.send(()); 
+                        }
+                        rx_config_tx = None; 
                         
-                        if let Some(st) = rx_stop_tx.take() { let _ = st.send(()); }
                         let _ = tx_req_tx.send(TxRequest::Stop);
-                        
-                        // 🟢 WIPE UI STATE: Force the UI to reset back to Idle
                         let _ = evt_tx.send(UiEvent::TheirCallChanged { 
-                            callsign: String::new(), 
-                            grid: None 
+                            callsign: String::new(),
+                            grid: None,
                         });
                         let _ = evt_tx.send(UiEvent::State("Idle".to_string()));
                         let _ = evt_tx.send(UiEvent::Info("STOPPED".into()));
@@ -900,7 +874,7 @@ async fn run_runtime(
                             EngineEvent::TheirCallChanged { callsign, grid } => {
                                 let _ = evt_tx.send(UiEvent::TheirCallChanged { 
                                     callsign: callsign.clone(),
-                                    grid: grid.clone(), // 🟢 NEW: Forward grid to UI
+                                    grid: grid.clone(),
                                 });
                                 let tc = if callsign.is_empty() { None } else { Some(callsign.clone()) };
                                 update_rx_config(&rx_config_tx, RxConfigUpdate::TheirCall(tc));
@@ -911,14 +885,13 @@ async fn run_runtime(
                                 if let Some(rec) = record { let _ = evt_tx.send(UiEvent::QsoLogged { record: rec.clone() }); }
                                 let _ = evt_tx.send(UiEvent::TheirCallChanged { 
                                     callsign: String::new(),
-                                    grid: None, // 🟢 NEW: Clear grid when QSO completes
+                                    grid: None,
                                 });
 
                                 if was_calling_cq {
                                     let (_, ev2) = qso_engine.on_intent(Intent::Cq);
                                     process_qso_events(&ev2, &evt_tx, &rx_config_tx);
                                     
-                                    // 🟢 CRITICAL FIX: Set running=true to actually transmit!
                                     running = true;
                                     last_slot_index = None;
                                     observed_remote_slot = None;
@@ -928,7 +901,6 @@ async fn run_runtime(
                                     let (_, ev2) = qso_engine.on_intent(Intent::Listen);
                                     process_qso_events(&ev2, &evt_tx, &rx_config_tx);
                                     
-                                    // 🟢 Also set running=true for Listen mode
                                     running = true;
                                     observed_remote_slot = None;
                                     
@@ -961,24 +933,28 @@ async fn run_runtime(
         }
     }
     
-    // Explicitly drop the guard on exit (this ensures Rigctld is cleanly killed before returning)
     drop(rigctld_process);
     
     Ok(())
 }
 
-fn restart_rx(
+// 🟢 NEW: async restart function that actively awaits the death of the old task!
+async fn restart_rx(
     rx_decoded_tx: &mpsc::UnboundedSender<RxDecoded>,
     rx_stop_tx: &mut Option<mpsc::UnboundedSender<()>>,
     rx_config_tx: &mut Option<mpsc::UnboundedSender<RxConfigUpdate>>,
+    rx_task: &mut Option<tokio::task::JoinHandle<()>>,
     cfg: RxAudioCfg,
 ) {
-    // 🟢 Stop old RX first
     if let Some(st) = rx_stop_tx.take() {
         let _ = st.send(());
-        log::info!("🛑 Stopping old RX, waiting for cleanup...");
-        // Give old audio stream time to close (prevents conflicts)
-        std::thread::sleep(Duration::from_millis(100));
+    }
+    
+    // 🟢 EXPLICIT WAIT: Force the runtime to wait for the old task to successfully drop ALSA
+    if let Some(handle) = rx_task.take() {
+        log::info!("🛑 Waiting for previous RX task to release audio device...");
+        let _ = handle.await;
+        log::info!("🛑 Previous RX task fully terminated. Audio device is free.");
     }
     
     let (stop_tx, stop_rx) = mpsc::unbounded_channel();
@@ -990,12 +966,14 @@ fn restart_rx(
         cfg.input_device, cfg.sample_rate, cfg.buffer_size, cfg.slot_len_ms,
         cfg.my_call, cfg.their_call, cfg.decode_window_secs,
         cfg.my_tx_slot, cfg.rx_slot_override, cfg.listen_all_slots);
-    tokio::spawn(crate::modem::run_receiver(
+        
+    // Save the new task handle!
+    *rx_task = Some(tokio::spawn(crate::modem::run_receiver(
         cfg,
         rx_decoded_tx.clone(),
         stop_rx,
         config_rx,
-    ));
+    )));
 }
 
 fn update_rx_config(
@@ -1025,29 +1003,15 @@ fn process_qso_events(
     }
 }
 
-// ─── AUDIO FILTER HELPER ───
-
-/// Use this helper inside app.rs (e.g. `crate::engine::runtime::is_relevant_audio_device(name)`)
-/// when fetching the list of devices to populate the UI dropdowns. It hides ALSA spam.
 pub fn is_relevant_audio_device(name: &str) -> bool {
     let lower = name.to_lowercase();
-    
-    // Always keep standard system defaults and BlackHole loops
-    if lower == "default" || lower.contains("blackhole") {
-        return true;
-    }
-
-    // Blacklist internal ALSA routing / pseudo-devices
+    if lower == "default" || lower.contains("blackhole") { return true; }
     let blacklist = [
         "sysdefault:", "front:", "surround", "center_lfe", 
         "iec958", "spdif", "dmix", "dsnoop", "dshare", "hw:", "plughw:", "samplerate"
     ];
-
     for blocked in blacklist.iter() {
-        if lower.starts_with(blocked) {
-            return false;
-        }
+        if lower.starts_with(blocked) { return false; }
     }
-    
     true
 }

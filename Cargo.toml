@@ -1,6 +1,6 @@
 [package]
 name = "msk2k"
-version = "0.1.46"
+version = "0.1.47"
 edition = "2021"
 authors = ["Roger Banks <GW4WND>"]
 description = "MSK2K digital mode transceiver for amateur radio"
