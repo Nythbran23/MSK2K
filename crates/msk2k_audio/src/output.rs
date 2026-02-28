@@ -207,7 +207,7 @@ fn try_start_wasapi_render(
     let collection = DeviceCollection::new(&Direction::Render).map_err(|e| format!("Collection err: {}", e))?;
         
     let mut target_dev = None;
-    for i in 0..collection.get_count().unwrap_or(0) {
+    for i in 0..collection.get_nbr_devices().unwrap_or(0) {
         if let Ok(dev) = collection.get_device_at_index(i) {
             if let Ok(name) = dev.get_friendlyname() {
                 if name == device_name || device_name.contains(&name) || name.contains(device_name) {
@@ -227,10 +227,10 @@ fn try_start_wasapi_render(
     let mut is_float = false;
     let mut bits = 16;
 
-    if client.is_supported_exclusive_with_dithering(&format_16).is_ok() && 
+    if client.is_supported_exclusive_with_quirks(&format_16).is_ok() && 
        client.initialize_client(&format_16, 100000, &Direction::Render, &ShareMode::Exclusive, false).is_ok() {
         is_float = false; bits = 16;
-    } else if client.is_supported_exclusive_with_dithering(&format_32).is_ok() && 
+    } else if client.is_supported_exclusive_with_quirks(&format_32).is_ok() && 
               client.initialize_client(&format_32, 100000, &Direction::Render, &ShareMode::Exclusive, false).is_ok() {
         is_float = true; bits = 32;
     } else {

@@ -169,7 +169,7 @@ fn try_start_wasapi_capture(
 
     let collection = DeviceCollection::new(&Direction::Capture).map_err(|e| format!("Collection err: {}", e))?;
     let mut target_dev = None;
-    for i in 0..collection.get_count().unwrap_or(0) {
+    for i in 0..collection.get_nbr_devices().unwrap_or(0) {
         if let Ok(dev) = collection.get_device_at_index(i) {
             if let Ok(name) = dev.get_friendlyname() {
                 if name == device_name || device_name.contains(&name) || name.contains(device_name) {
@@ -189,10 +189,10 @@ fn try_start_wasapi_capture(
     let mut is_float = false;
     let mut bits = 16;
 
-    if client.is_supported_exclusive_with_dithering(&format_16).is_ok() && 
+    if client.is_supported_exclusive_with_quirks(&format_16).is_ok() && 
        client.initialize_client(&format_16, 100000, &Direction::Capture, &ShareMode::Exclusive, false).is_ok() {
         is_float = false; bits = 16;
-    } else if client.is_supported_exclusive_with_dithering(&format_32).is_ok() && 
+    } else if client.is_supported_exclusive_with_quirks(&format_32).is_ok() && 
               client.initialize_client(&format_32, 100000, &Direction::Capture, &ShareMode::Exclusive, false).is_ok() {
         is_float = true; bits = 32;
     } else {
@@ -207,13 +207,20 @@ fn try_start_wasapi_capture(
     let channels = config.channels as usize;
 
     std::thread::spawn(move || {
+        let bytes_per_frame = (bits / 8) * channels;
+        // Pre-allocate a buffer large enough for a massive chunk of audio data
+        let mut byte_buffer = vec![0u8; 96000 * bytes_per_frame];
+
         loop {
             if stop_rx.try_recv().is_ok() { break; }
             if h_event.wait_for_event(1000).is_err() { break; }
 
-            if let Ok(buffer) = capture_client.read_from_device() {
-                let bytes = buffer.as_slice();
-                let mut f32_samples = Vec::with_capacity(bytes.len() / (bits / 8 * channels));
+            if let Ok((frames_read, _flags)) = capture_client.read_from_device(bytes_per_frame, &mut byte_buffer) {
+                let valid_bytes = (frames_read as usize) * bytes_per_frame;
+                if valid_bytes == 0 { continue; }
+                
+                let bytes = &byte_buffer[..valid_bytes];
+                let mut f32_samples = Vec::with_capacity(frames_read as usize * channels);
 
                 if is_float && bits == 32 {
                     let floats: &[f32] = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
