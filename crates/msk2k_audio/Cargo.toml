@@ -23,6 +23,10 @@ log = "0.4"
 # Optional features
 serde = { version = "1.0", features = ["derive"], optional = true }
 
+# 🟢 Windows-Only WASAPI Exclusive Bypass
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.13.0"
+
 [dev-dependencies]
 env_logger = "0.11"
 hound = "3.5"  # WAV file I/O for examples
