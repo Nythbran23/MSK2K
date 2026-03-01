@@ -90,6 +90,8 @@ pub enum UiCmd {
     Stop,
     SetBand(String),
     SetTxLevel(f32),
+    SetPttDelay(u32),   // milliseconds: 0, 20, 40, 60, 80, 100
+    SetWatchdog(bool),  // enable/disable QSO watchdog (60 min limit)
     PublicTx {
         my_call: String,
         text: String,
@@ -128,11 +130,13 @@ pub enum UiEvent {
         rig_port: String,
         rig_baud: String,
         slot_period: SlotPeriod,
+        ptt_delay_ms: u32,
     },
     RigFreqChanged {
         freq_hz: u64,
     },
     TxActive(bool),
+    WatchdogTripped,    // fired when the 60-min QSO watchdog aborts a QSO
 }
 
 pub struct EngineHandle {

@@ -94,6 +94,7 @@ struct AppConfig {
     rig_port: String,
     rig_baud: String,
     slot_period: SlotPeriod,
+    ptt_delay_ms: u32,  // delay between PTT and audio TX start (0-100ms)
 }
 fn config_file_path() -> std::path::PathBuf {
     let mut path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -132,6 +133,7 @@ fn load_config() -> AppConfig {
                             _ => SlotPeriod::S15,
                         };
                     }
+                    "ptt_delay_ms" => cfg.ptt_delay_ms = v.trim().parse().unwrap_or(0),
                     _ => {}
                 }
             }
@@ -156,14 +158,15 @@ fn save_config(cfg: &AppConfig) {
         SlotPeriod::S15 => "15",
     };
     let data = format!(
-        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\nslot_period={}\n",
+        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\nslot_period={}\nptt_delay_ms={}\n",
         cfg.my_call,
         cfg.input_device.as_deref().unwrap_or(""),
         cfg.output_device.as_deref().unwrap_or(""),
         cfg.rig_model,
         cfg.rig_port,
         cfg.rig_baud,
-        period_str
+        period_str,
+        cfg.ptt_delay_ms
     );
     if let Err(e) = fs::write(config_file_path(), data) {
         log::warn!("Failed to save config: {}", e);
@@ -219,6 +222,7 @@ async fn run_runtime(
         rig_port: saved_cfg.rig_port.clone(),
         rig_baud: saved_cfg.rig_baud.clone(),
         slot_period: saved_cfg.slot_period,
+        ptt_delay_ms: saved_cfg.ptt_delay_ms,
     });
 
     let mut input_device: Option<String> = saved_cfg.input_device.clone();
@@ -247,6 +251,13 @@ async fn run_runtime(
     let mut was_calling_cq: bool = false;
     let mut rx_needs_restart: bool = true;
     let mut diag_tick: u64 = 0; // 🔍 DIAGNOSTIC: heartbeat counter
+
+    // PTT delay (ms between set_ptt(true) and audio start) — hardware-specific, persisted
+    let mut ptt_delay_ms: u32 = saved_cfg.ptt_delay_ms;
+    // QSO watchdog — aborts a QSO if it exceeds 60 minutes (default on, session-only)
+    let mut watchdog_enabled: bool = true;
+    let mut qso_started_at: Option<std::time::Instant> = None;
+    const QSO_WATCHDOG_SECS: u64 = 3600;
 
     let (ham_update_tx, mut ham_update_rx) = mpsc::unbounded_channel();
     let mut hamlib: Option<HamlibClient> = None;
@@ -346,6 +357,25 @@ async fn run_runtime(
                     if let Some(h) = &hamlib { h.refresh(); }
                 }
 
+                // ⏰ QSO WATCHDOG: abort QSO if it exceeds the 60-minute limit
+                if watchdog_enabled {
+                    if let Some(started) = qso_started_at {
+                        if started.elapsed().as_secs() >= QSO_WATCHDOG_SECS {
+                            log::warn!("⏰ QSO WATCHDOG: 60-minute limit reached, aborting QSO");
+                            qso_started_at = None;
+                            qso_engine.set_their_call(None);
+                            let (_, ev) = qso_engine.on_intent(Intent::Abort);
+                            process_qso_events(&ev, &evt_tx, &rx_config_tx);
+                            observed_remote_slot = None;
+                            update_rx_config(&rx_config_tx, RxConfigUpdate::TheirCall(None));
+                            let _ = evt_tx.send(UiEvent::WatchdogTripped);
+                            let _ = evt_tx.send(UiEvent::TheirCallChanged { callsign: String::new(), grid: None });
+                            let _ = evt_tx.send(UiEvent::State("Listening".to_string()));
+                            let _ = evt_tx.send(UiEvent::Info("⏰ QSO watchdog: 60-min limit reached".into()));
+                        }
+                    }
+                }
+
                 let now_ms = utc_ms_now();
                 let slen = slot_len_ms(slot_period);
                 let sidx = slot_index(now_ms, slen);
@@ -395,7 +425,11 @@ async fn run_runtime(
                         }
 
                         update_rx_config(&rx_config_tx, RxConfigUpdate::PauseAudio);
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        // PTT delay: wait between set_ptt(true) and audio stream start.
+                        // Required on Linux (single CODEC instance). Default 0ms on macOS/Windows.
+                        if ptt_delay_ms > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(ptt_delay_ms as u64));
+                        }
 
                         if let Some(payload) = qso_engine.next_tx() {
                             let mut final_payload = payload;
@@ -440,6 +474,7 @@ async fn run_runtime(
 
                                 if qso_engine.tx_repeat_count >= max_73_repeats {
                                     let their = qso_engine.their_call.clone().unwrap_or_default();
+                                    qso_started_at = None; // watchdog: QSO over
                                     if let Some(rec) = qso_engine.make_qso_record() {
                                         let _ = evt_tx.send(UiEvent::QsoLogged { record: rec });
                                     }
@@ -507,6 +542,7 @@ async fn run_runtime(
                             rig_port: current_rig_port.clone(),
                             rig_baud: current_rig_baud.clone(),
                             slot_period,
+                            ptt_delay_ms,
                         });
                     }
                     UiCmd::SetSlotParity(p) => { slot_parity_cfg = p; }
@@ -626,6 +662,7 @@ async fn run_runtime(
                             rig_port: current_rig_port.clone(),
                             rig_baud: current_rig_baud.clone(),
                             slot_period,
+                            ptt_delay_ms,
                         });
                         log::info!("[ENGINE] Audio settings applied & saved");
                     }
@@ -641,6 +678,7 @@ async fn run_runtime(
                                 rig_port: current_rig_port.clone(),
                                 rig_baud: current_rig_baud.clone(),
                                 slot_period,
+                                ptt_delay_ms,
                             });
                         }
                         
@@ -649,6 +687,8 @@ async fn run_runtime(
                             tx_active = false;
                             let _ = evt_tx.send(UiEvent::TxActive(false));
                         }
+                        
+                        qso_started_at = None; // watchdog: back to listen
                         
                         qso_engine.set_their_call(if tc.is_empty() { None } else { Some(tc) });
 
@@ -732,6 +772,9 @@ async fn run_runtime(
                             callsign: tc.clone(),
                             grid: None,
                         });
+                        // Start watchdog when we initiate a call
+                        qso_started_at = Some(std::time::Instant::now());
+                        log::info!("⏰ QSO watchdog started (CallStation)");
 
                         running = true;
                         last_slot_index = None;
@@ -772,6 +815,9 @@ async fn run_runtime(
                         running = true;
                         last_slot_index = None;
                         was_calling_cq = false;
+                        // Start watchdog when answering a CQ
+                        qso_started_at = Some(std::time::Instant::now());
+                        log::info!("⏰ QSO watchdog started (AnswerCq)");
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
                             output_device: output_device.clone(),
                             output_level,
@@ -790,6 +836,7 @@ async fn run_runtime(
                         if let Some(h) = &hamlib { h.set_ptt(false); }
                         if tx_active { tx_active = false; let _ = evt_tx.send(UiEvent::TxActive(false)); }
                         
+                        qso_started_at = None; // watchdog: stopped
                         qso_engine.set_their_call(None);
                         let (_, events) = qso_engine.on_intent(Intent::Abort);
                         process_qso_events(&events, &evt_tx, &rx_config_tx);
@@ -810,6 +857,24 @@ async fn run_runtime(
                         });
                         let _ = evt_tx.send(UiEvent::State("Idle".to_string()));
                         let _ = evt_tx.send(UiEvent::Info("STOPPED".into()));
+                    }
+                    UiCmd::SetPttDelay(ms) => {
+                        ptt_delay_ms = ms;
+                        log::info!("[ENGINE] PTT delay set to {}ms", ms);
+                        save_config(&AppConfig {
+                            my_call: qso_engine.my_call.clone(),
+                            input_device: input_device.clone(),
+                            output_device: output_device.clone(),
+                            rig_model: current_rig_model.clone(),
+                            rig_port: current_rig_port.clone(),
+                            rig_baud: current_rig_baud.clone(),
+                            slot_period,
+                            ptt_delay_ms,
+                        });
+                    }
+                    UiCmd::SetWatchdog(enabled) => {
+                        watchdog_enabled = enabled;
+                        log::info!("[ENGINE] QSO watchdog {}", if enabled { "enabled" } else { "disabled" });
                     }
                     _ => {}
                 }
@@ -878,15 +943,21 @@ async fn run_runtime(
                                 });
                                 let tc = if callsign.is_empty() { None } else { Some(callsign.clone()) };
                                 // 🟢 FIX: Clear was_calling_cq when a QSO partner is established.
-                                // This prevents the slot boundary TX handler from overriding mid-QSO
-                                // messages (R-report, RR, 73) with a Grid CQ packet.
                                 if !callsign.is_empty() {
                                     was_calling_cq = false;
+                                    // Start the QSO watchdog timer
+                                    if qso_started_at.is_none() {
+                                        qso_started_at = Some(std::time::Instant::now());
+                                        log::info!("⏰ QSO watchdog started");
+                                    }
+                                } else {
+                                    qso_started_at = None;
                                 }
                                 update_rx_config(&rx_config_tx, RxConfigUpdate::TheirCall(tc));
                             }
                             EngineEvent::QsoComplete { their, record } => {
                                 qso_completed = true;
+                                qso_started_at = None; // watchdog: QSO over
                                 let _ = evt_tx.send(UiEvent::Info(format!("✓ QSO with {} complete", their)));
                                 if let Some(rec) = record { let _ = evt_tx.send(UiEvent::QsoLogged { record: rec.clone() }); }
                                 let _ = evt_tx.send(UiEvent::TheirCallChanged { 
@@ -1012,7 +1083,7 @@ pub fn is_relevant_audio_device(name: &str) -> bool {
     if lower == "default" || lower.contains("blackhole") { return true; }
     let blacklist = [
         "sysdefault:", "front:", "surround", "center_lfe", 
-        "iec958", "spdif", "dmix", "dsnoop", "dshare", "hw:", "plughw:", "samplerate"
+        "iec958", "spdif", "dmix", "dsnoop", "dshare", "hw:", "samplerate"
     ];
     for blocked in blacklist.iter() {
         if lower.starts_with(blocked) { return false; }

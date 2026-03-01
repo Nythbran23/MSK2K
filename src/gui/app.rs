@@ -93,6 +93,11 @@ struct Msk2kEguiApp {
     rig_search: String,
     cat_connected: bool,  // True only after a fresh RigFreqChanged is received post-boot
     last_cat_rx: Option<std::time::Instant>, // When we last got a valid freq from CAT
+    // PTT delay setting (persisted)
+    ptt_delay_ms: u32,
+    // QSO watchdog (session-only, default on)
+    watchdog_enabled: bool,
+    qso_started_at: Option<std::time::Instant>,
 }
 
 impl Msk2kEguiApp {
@@ -187,6 +192,9 @@ impl Msk2kEguiApp {
             rig_search: String::new(),
             cat_connected: false,
             last_cat_rx: None,
+            ptt_delay_ms: 0,
+            watchdog_enabled: true,
+            qso_started_at: None,
         }
     }
 
@@ -215,7 +223,7 @@ impl Msk2kEguiApp {
     fn drain_events(&mut self) {
         while let Ok(ev) = self.engine.events.try_recv() {
             match ev {
-                UiEvent::ConfigLoaded { my_call, input_device, output_device, rig_model, rig_port, rig_baud, slot_period } => {
+                UiEvent::ConfigLoaded { my_call, input_device, output_device, rig_model, rig_port, rig_baud, slot_period, ptt_delay_ms } => {
                     log::info!("[UI] ConfigLoaded event received");
                     
                     // Reset CAT state — don't trust any frequency until a fresh read arrives
@@ -225,6 +233,7 @@ impl Msk2kEguiApp {
 
                     if !my_call.is_empty() { self.my_call = my_call.clone(); }
                     self.slot_period = slot_period;
+                    self.ptt_delay_ms = ptt_delay_ms;
                     
                     if let Some(in_d) = input_device {
                         if self.in_devs.contains(&in_d) { self.sel_in = Some(in_d); }
@@ -308,9 +317,21 @@ impl Msk2kEguiApp {
                 UiEvent::TheirCallChanged { callsign, grid } => { 
                     self.their_call = callsign.clone(); 
                     if !callsign.is_empty() { 
-                        self.color_history_for_call(&callsign); 
+                        self.color_history_for_call(&callsign);
+                        if self.qso_started_at.is_none() {
+                            self.qso_started_at = Some(std::time::Instant::now());
+                        }
+                    } else {
+                        self.qso_started_at = None;
                     }
                     let _ = grid; 
+                }
+                UiEvent::WatchdogTripped => {
+                    self.in_active_qso = false;
+                    self.their_call = String::new();
+                    self.qso_started_at = None;
+                    self.is_listening = true;
+                    self.is_calling_cq = false;
                 }
                 UiEvent::TxSlotChanged { slot } => {
                     if self.saved_slot_parity.is_none() {
@@ -330,6 +351,7 @@ impl Msk2kEguiApp {
                     self.qso_log.insert(0, updated_record);
                     self.their_call = String::new(); 
                     self.in_active_qso = false;
+                    self.qso_started_at = None;
                     self.reset_dedupe();
                     
                     if let Some(saved) = self.saved_slot_parity.take() {
@@ -544,6 +566,29 @@ impl eframe::App for Msk2kEguiApp {
                         let _ = self.engine.cmds.send(UiCmd::SetTxLevel(self.tx_level));
                     }
                 });
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("PTT TX Delay:");
+                    let old_delay = self.ptt_delay_ms;
+                    egui::ComboBox::from_id_salt("ptt_delay")
+                        .selected_text(if self.ptt_delay_ms == 0 {
+                            "0 ms (off)".to_string()
+                        } else {
+                            format!("{} ms", self.ptt_delay_ms)
+                        })
+                        .width(110.0)
+                        .show_ui(ui, |ui| {
+                            for ms in [0u32, 20, 40, 60, 80, 100] {
+                                let label = if ms == 0 { "0 ms (off)".to_string() } else { format!("{} ms", ms) };
+                                ui.selectable_value(&mut self.ptt_delay_ms, ms, label);
+                            }
+                        });
+                    if self.ptt_delay_ms != old_delay {
+                        let _ = self.engine.cmds.send(UiCmd::SetPttDelay(self.ptt_delay_ms));
+                    }
+                    ui.label(egui::RichText::new("(Delay between PTT and TX audio start)").small().color(egui::Color32::GRAY));
+                });
                 
                 ui.add_space(15.0);
                 if ui.button("Save & Close").clicked() { close = true; }
@@ -734,11 +779,42 @@ impl eframe::App for Msk2kEguiApp {
                     let _ = self.engine.cmds.send(UiCmd::CallStation { my_call: self.my_call.clone(), their_call: t });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⏹ STOP").clicked() { self.their_call = String::new(); self.is_calling_cq = false; self.is_listening = false; self.in_active_qso = false; let _ = self.engine.cmds.send(UiCmd::Stop); }
+                    if ui.button("⏹ STOP").clicked() { self.their_call = String::new(); self.is_calling_cq = false; self.is_listening = false; self.in_active_qso = false; self.qso_started_at = None; let _ = self.engine.cmds.send(UiCmd::Stop); }
                     if self.in_active_qso || !self.their_call.is_empty() {
                         ui.add_space(10.0);
                         let green = egui::Color32::from_rgb(56, 120, 70);
                         ui.add(egui::Button::new(egui::RichText::new("IN QSO").strong().color(egui::Color32::WHITE)).fill(green).sense(egui::Sense::hover()));
+                        // Watchdog toggle button + elapsed display
+                        let wd_color = if self.watchdog_enabled {
+                            egui::Color32::from_rgb(0, 110, 60)
+                        } else {
+                            egui::Color32::from_rgb(80, 40, 40)
+                        };
+                        let wd_label = if self.watchdog_enabled { "⏰ WD" } else { "⏰ OFF" };
+                        if ui.add_sized([52.0, 24.0], egui::Button::new(wd_label).fill(wd_color)).clicked() {
+                            self.watchdog_enabled = !self.watchdog_enabled;
+                            let _ = self.engine.cmds.send(UiCmd::SetWatchdog(self.watchdog_enabled));
+                        }
+                        // Show elapsed time since QSO started
+                        if let Some(started) = self.qso_started_at {
+                            let elapsed = started.elapsed().as_secs();
+                            let mins = elapsed / 60;
+                            let secs = elapsed % 60;
+                            let remaining = 3600u64.saturating_sub(elapsed);
+                            let rem_mins = remaining / 60;
+                            let rem_secs = remaining % 60;
+                            let elapsed_color = if self.watchdog_enabled && remaining < 300 {
+                                egui::Color32::from_rgb(255, 100, 50) // orange warning <5 min left
+                            } else {
+                                egui::Color32::GRAY
+                            };
+                            let elapsed_text = if self.watchdog_enabled {
+                                format!("{:02}:{:02} / -{:02}:{:02}", mins, secs, rem_mins, rem_secs)
+                            } else {
+                                format!("{:02}:{:02}", mins, secs)
+                            };
+                            ui.label(egui::RichText::new(elapsed_text).monospace().small().color(elapsed_color));
+                        }
                     }
                 });
             });
