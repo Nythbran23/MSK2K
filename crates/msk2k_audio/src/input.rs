@@ -180,7 +180,6 @@ fn try_start_wasapi_capture(
             Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
         };
 
-        // 🟢 SMART FALLBACK: Try requested channels, pivot if rejected
         let mut format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
         let mut actual_channels = config.channels as usize;
 
@@ -203,28 +202,35 @@ fn try_start_wasapi_capture(
         if init_tx.send(Ok(())).is_err() { let _ = client.stop_stream(); return; }
 
         let channels = actual_channels;
-        let bytes_per_frame = 2 * channels; // 16-bit = 2 bytes
+        let bytes_per_frame = 2 * channels; 
         let mut byte_buffer = vec![0u8; 96000 * bytes_per_frame];
 
         loop {
             if stop_rx.try_recv().is_ok() { break; }
             if h_event.wait_for_event(1000).is_err() { break; }
 
-            if let Ok((frames_read, _flags)) = capture_client.read_from_device(bytes_per_frame, &mut byte_buffer) {
-                let valid_bytes = (frames_read as usize) * bytes_per_frame;
-                if valid_bytes == 0 { continue; }
+            // 🟢 BUG FIXED: Loop to drain all available packets from the hardware buffer!
+            while let Ok(packet_size) = capture_client.get_next_packet_size() {
+                if packet_size == 0 { break; }
                 
-                let bytes = &byte_buffer[..valid_bytes];
-                let mut f32_samples = Vec::with_capacity(frames_read as usize * channels);
+                if let Ok((frames_read, _flags)) = capture_client.read_from_device(bytes_per_frame, &mut byte_buffer) {
+                    let valid_bytes = (frames_read as usize) * bytes_per_frame;
+                    if valid_bytes == 0 { continue; }
+                    
+                    let bytes = &byte_buffer[..valid_bytes];
+                    let mut f32_samples = Vec::with_capacity(frames_read as usize * channels);
 
-                let ints: &[i16] = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2) };
-                if channels == 1 { 
-                    for &s in ints { f32_samples.push(s as f32 / 32768.0); } 
-                } else { 
-                    for chunk in ints.chunks(channels) { if !chunk.is_empty() { f32_samples.push(chunk[0] as f32 / 32768.0); } } 
+                    let ints: &[i16] = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2) };
+                    if channels == 1 { 
+                        for &s in ints { f32_samples.push(s as f32 / 32768.0); } 
+                    } else { 
+                        for chunk in ints.chunks(channels) { if !chunk.is_empty() { f32_samples.push(chunk[0] as f32 / 32768.0); } } 
+                    }
+                    
+                    if tx.send(f32_samples).is_err() { break; }
+                } else {
+                    break;
                 }
-                
-                if tx.send(f32_samples).is_err() { break; }
             }
         }
         let _ = client.stop_stream();

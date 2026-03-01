@@ -98,8 +98,16 @@ impl AudioOutput {
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut buffer = sample_buffer_f32.lock().unwrap();
-                if buffer.len() < data.len() * 2 {
-                    if let Ok(new_samples) = rx_f32.blocking_lock().try_recv() { buffer.extend_from_slice(&new_samples); }
+                let frames_needed = data.len() / channels;
+
+                // 🟢 CPAL FIX: Loop to drain the queue until we have enough audio for large USB buffers
+                if let Ok(mut lock) = rx_f32.try_lock() {
+                    while buffer.len() < frames_needed {
+                        match lock.try_recv() {
+                            Ok(new_samples) => buffer.extend_from_slice(&new_samples),
+                            Err(_) => break, 
+                        }
+                    }
                 }
 
                 if channels == 1 {
@@ -107,16 +115,17 @@ impl AudioOutput {
                     if copy_len > 0 { data[..copy_len].copy_from_slice(&buffer[..copy_len]); buffer.drain(..copy_len); }
                     if copy_len < data.len() { data[copy_len..].fill(0.0); }
                 } else {
-                    let frames = data.len() / channels;
-                    let copy_frames = frames.min(buffer.len());
+                    let copy_frames = frames_needed.min(buffer.len());
                     if copy_frames > 0 {
                         for i in 0..copy_frames {
                             let sample = buffer[i];
-                            for ch in 0..channels { data[i * channels + ch] = sample; }
+                            for ch in 0..channels { 
+                                data[i * channels + ch] = if ch == 0 { sample } else { 0.0 }; 
+                            }
                         }
                         buffer.drain(..copy_frames);
                     }
-                    if copy_frames < frames { data[copy_frames * channels..].fill(0.0); }
+                    if copy_frames < frames_needed { data[copy_frames * channels..].fill(0.0); }
                 }
             },
             move |err| { log::error!("Audio output stream error: {}", err); },
@@ -126,9 +135,16 @@ impl AudioOutput {
                 &stream_config,
                 move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                     let mut buffer = sample_buffer_i16.lock().unwrap();
-                    let frames = data.len() / channels_i16;
-                    if buffer.len() < frames * 2 {
-                        if let Ok(new_samples) = rx_i16.blocking_lock().try_recv() { buffer.extend_from_slice(&new_samples); }
+                    let frames_needed = data.len() / channels_i16;
+
+                    // 🟢 CPAL FIX (i16 version)
+                    if let Ok(mut lock) = rx_i16.try_lock() {
+                        while buffer.len() < frames_needed {
+                            match lock.try_recv() {
+                                Ok(new_samples) => buffer.extend_from_slice(&new_samples),
+                                Err(_) => break, 
+                            }
+                        }
                     }
 
                     if channels_i16 == 1 {
@@ -139,15 +155,17 @@ impl AudioOutput {
                         }
                         if copy_len < data.len() { data[copy_len..].fill(0); }
                     } else {
-                        let copy_frames = frames.min(buffer.len());
+                        let copy_frames = frames_needed.min(buffer.len());
                         if copy_frames > 0 {
                             for i in 0..copy_frames {
                                 let sample_i16 = (buffer[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                                for ch in 0..channels_i16 { data[i * channels_i16 + ch] = sample_i16; }
+                                for ch in 0..channels_i16 { 
+                                    data[i * channels_i16 + ch] = if ch == 0 { sample_i16 } else { 0 }; 
+                                }
                             }
                             buffer.drain(..copy_frames);
                         }
-                        if copy_frames < frames { data[copy_frames * channels_i16..].fill(0); }
+                        if copy_frames < frames_needed { data[copy_frames * channels_i16..].fill(0); }
                     }
                 },
                 move |err| { log::error!("Audio output stream error: {}", err); },
@@ -223,7 +241,6 @@ fn try_start_wasapi_render(
             Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
         };
 
-        // 🟢 SMART FALLBACK: Try requested channels, pivot if rejected
         let mut format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
         let mut actual_channels = config.channels as usize;
 
@@ -247,7 +264,7 @@ fn try_start_wasapi_render(
 
         let channels = actual_channels;
         let mut sample_buffer = Vec::new();
-        let byte_per_frame = 2 * channels; // 16-bit = 2 bytes
+        let byte_per_frame = 2 * channels; 
 
         loop {
             if stop_rx.try_recv().is_ok() { break; }
@@ -270,7 +287,9 @@ fn try_start_wasapi_render(
                 
                 for i in 0..copy_frames {
                     let s = (sample_buffer[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                    for ch in 0..channels { data[i * channels + ch] = s; }
+                    for ch in 0..channels { 
+                        data[i * channels + ch] = if ch == 0 { s } else { 0 }; 
+                    }
                 }
                 
                 sample_buffer.drain(..copy_frames);
