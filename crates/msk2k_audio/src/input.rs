@@ -180,12 +180,19 @@ fn try_start_wasapi_capture(
             Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
         };
 
-        // Strictly enforce 16-bit Integer PCM (Radio Hardware Native)
-        let format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
+        // 🟢 SMART FALLBACK: Try requested channels, pivot if rejected
+        let mut format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
+        let mut actual_channels = config.channels as usize;
+
+        if client.is_supported_exclusive_with_quirks(&format_16).is_err() {
+            let alt_channels = if config.channels == 2 { 1 } else { 2 };
+            format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, alt_channels, None);
+            actual_channels = alt_channels;
+        }
 
         if client.is_supported_exclusive_with_quirks(&format_16).is_err() || 
            client.initialize_client(&format_16, 0, &Direction::Capture, &ShareMode::Exclusive, false).is_err() {
-            let _ = init_tx.send(Err("Hardware refused 48kHz 16-bit Exclusive Mode".to_string()));
+            let _ = init_tx.send(Err("Hardware refused 48kHz 16-bit Exclusive Mode (Mono & Stereo)".to_string()));
             return;
         }
 
@@ -195,7 +202,7 @@ fn try_start_wasapi_capture(
 
         if init_tx.send(Ok(())).is_err() { let _ = client.stop_stream(); return; }
 
-        let channels = config.channels as usize;
+        let channels = actual_channels;
         let bytes_per_frame = 2 * channels; // 16-bit = 2 bytes
         let mut byte_buffer = vec![0u8; 96000 * bytes_per_frame];
 

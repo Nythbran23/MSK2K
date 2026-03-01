@@ -223,12 +223,19 @@ fn try_start_wasapi_render(
             Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
         };
 
-        // Strictly enforce 16-bit Integer PCM
-        let format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
+        // 🟢 SMART FALLBACK: Try requested channels, pivot if rejected
+        let mut format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
+        let mut actual_channels = config.channels as usize;
+
+        if client.is_supported_exclusive_with_quirks(&format_16).is_err() {
+            let alt_channels = if config.channels == 2 { 1 } else { 2 };
+            format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, alt_channels, None);
+            actual_channels = alt_channels;
+        }
 
         if client.is_supported_exclusive_with_quirks(&format_16).is_err() || 
            client.initialize_client(&format_16, 0, &Direction::Render, &ShareMode::Exclusive, false).is_err() {
-            let _ = init_tx.send(Err("Hardware refused 48kHz 16-bit Exclusive Mode".to_string())); 
+            let _ = init_tx.send(Err("Hardware refused 48kHz 16-bit Exclusive Mode (Mono & Stereo)".to_string())); 
             return;
         }
 
@@ -238,7 +245,7 @@ fn try_start_wasapi_render(
 
         if init_tx.send(Ok(())).is_err() { let _ = client.stop_stream(); return; }
 
-        let channels = config.channels as usize;
+        let channels = actual_channels;
         let mut sample_buffer = Vec::new();
         let byte_per_frame = 2 * channels; // 16-bit = 2 bytes
 
@@ -249,18 +256,17 @@ fn try_start_wasapi_render(
             let frames_available = client.get_available_space_in_frames().unwrap_or(0) as usize;
             if frames_available > 0 {
                 
-                // 🟢 BUG FIXED: Loop try_recv until the buffer is adequately filled to prevent stuttering zero-pads
                 if let Ok(mut lock) = rx.try_lock() {
                     while sample_buffer.len() < frames_available {
                         match lock.try_recv() {
                             Ok(new_samples) => sample_buffer.extend_from_slice(&new_samples),
-                            Err(_) => break, // Queue is fully empty
+                            Err(_) => break, 
                         }
                     }
                 }
 
                 let copy_frames = frames_available.min(sample_buffer.len());
-                let mut data = vec![0i16; frames_available * channels]; // Zero-pad the remaining array naturally
+                let mut data = vec![0i16; frames_available * channels]; 
                 
                 for i in 0..copy_frames {
                     let s = (sample_buffer[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
