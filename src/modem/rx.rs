@@ -90,7 +90,7 @@ pub async fn run_receiver(
     log::info!("[RX] Opening Device: {}", device.name().unwrap_or_default());
 
     // 🟢 FORCE 2 CHANNELS: This prevents macOS from downmixing L+R and ruining the phase data
-    let audio_cfg = AudioConfig::new(cfg.sample_rate, 2, cfg.buffer_size);
+    let audio_cfg = AudioConfig::new(cfg.sample_rate, 1, cfg.buffer_size);
     let mut audio_input = match AudioInputBuilder::new().device(device).config(audio_cfg).build() {
         Ok(ai) => ai,
         Err(e) => { log::error!("[RX] Failed to build AudioInput: {:?}", e); return; }
@@ -140,8 +140,8 @@ pub async fn run_receiver(
                     },
                     RxConfigUpdate::EndOfPeriod => {
                         // RX→RX boundary: drain remaining audio, process accumulation
-                        while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
-                            for s in &mut chunk { *s *= 0.5; }
+                        while let Ok(chunk) = audio_chunk_rx.try_recv() {
+                            //for s in &mut chunk { *s *= 0.5; }
                             retained_audio.extend_from_slice(&chunk);
                             let candidates = extractor.push_audio(&chunk);
                             for candidate in candidates {
@@ -169,8 +169,8 @@ pub async fn run_receiver(
                             audio_input.stop();
                             audio_paused = true;
 
-                            while let Ok(mut chunk) = audio_chunk_rx.try_recv() {
-                                for s in &mut chunk { *s *= 0.5; }
+                            while let Ok(chunk) = audio_chunk_rx.try_recv() {
+                                //for s in &mut chunk { *s *= 0.5; }
                                 retained_audio.extend_from_slice(&chunk);
                                 let candidates = extractor.push_audio(&chunk);
                                 for candidate in candidates {
@@ -248,7 +248,7 @@ pub async fn run_receiver(
                                 *s = (*s * gain) + (sim.rng.cheap_noise() * sim_noise_floor);
                             }
                         }
-                        for s in &mut chunk { *s *= 0.5; }
+                        //for s in &mut chunk { *s *= 0.5; }
 
                         let candidates = extractor.push_audio(&chunk);
                         for candidate in &candidates {
