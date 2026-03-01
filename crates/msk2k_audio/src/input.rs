@@ -163,52 +163,84 @@ fn try_start_wasapi_capture(
     config: &AudioConfig,
     tx: mpsc::UnboundedSender<Vec<AudioSample>>,
 ) -> Result<tokio::sync::oneshot::Sender<()>, String> {
-    use wasapi::{initialize_mta, DeviceCollection, Direction, ShareMode, WaveFormat, SampleType};
+    let (init_tx, init_rx) = std::sync::mpsc::channel();
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+    
+    let device_name = device_name.to_string();
+    let config = config.clone();
 
-    let _ = initialize_mta();
+    std::thread::spawn(move || {
+        use wasapi::{initialize_mta, DeviceCollection, Direction, ShareMode, WaveFormat, SampleType};
 
-    let collection = DeviceCollection::new(&Direction::Capture).map_err(|e| format!("Collection err: {}", e))?;
-    let mut target_dev = None;
-    for i in 0..collection.get_nbr_devices().unwrap_or(0) {
-        if let Ok(dev) = collection.get_device_at_index(i) {
-            if let Ok(name) = dev.get_friendlyname() {
-                if name == device_name || device_name.contains(&name) || name.contains(device_name) {
-                    target_dev = Some(dev);
-                    break;
+        let _ = initialize_mta();
+
+        let collection_res = DeviceCollection::new(&Direction::Capture);
+        let collection = match collection_res {
+            Ok(c) => c,
+            Err(e) => { let _ = init_tx.send(Err(format!("Collection err: {}", e))); return; }
+        };
+
+        let mut target_dev = None;
+        for i in 0..collection.get_nbr_devices().unwrap_or(0) {
+            if let Ok(dev) = collection.get_device_at_index(i) {
+                if let Ok(name) = dev.get_friendlyname() {
+                    if name == device_name || device_name.contains(&name) || name.contains(&device_name) {
+                        target_dev = Some(dev);
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    let device = target_dev.ok_or_else(|| "WASAPI Device not found".to_string())?;
-    let mut client = device.get_iaudioclient().map_err(|e| e.to_string())?;
+        let device = match target_dev {
+            Some(d) => d,
+            None => { let _ = init_tx.send(Err("WASAPI Device not found".to_string())); return; }
+        };
 
-    let format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
-    let format_32 = WaveFormat::new(32, 32, &SampleType::Float, config.sample_rate as usize, config.channels as usize, None);
+        let mut client = match device.get_iaudioclient() {
+            Ok(c) => c,
+            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
+        };
 
-    let mut is_float = false;
-    let mut bits = 16;
+        let format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
+        let format_32 = WaveFormat::new(32, 32, &SampleType::Float, config.sample_rate as usize, config.channels as usize, None);
 
-    if client.is_supported_exclusive_with_quirks(&format_16).is_ok() && 
-       client.initialize_client(&format_16, 100000, &Direction::Capture, &ShareMode::Exclusive, false).is_ok() {
-        is_float = false; bits = 16;
-    } else if client.is_supported_exclusive_with_quirks(&format_32).is_ok() && 
-              client.initialize_client(&format_32, 100000, &Direction::Capture, &ShareMode::Exclusive, false).is_ok() {
-        is_float = true; bits = 32;
-    } else {
-        return Err("Hardware refused 48kHz 16/32-bit Exclusive Mode".to_string());
-    }
+        let mut is_float = false;
+        let mut bits = 16;
 
-    let h_event = client.set_get_eventhandle().map_err(|e| e.to_string())?;
-    let capture_client = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
-    client.start_stream().map_err(|e| e.to_string())?;
+        if client.is_supported_exclusive_with_quirks(&format_16).is_ok() && 
+           client.initialize_client(&format_16, 100000, &Direction::Capture, &ShareMode::Exclusive, false).is_ok() {
+            is_float = false; bits = 16;
+        } else if client.is_supported_exclusive_with_quirks(&format_32).is_ok() && 
+                  client.initialize_client(&format_32, 100000, &Direction::Capture, &ShareMode::Exclusive, false).is_ok() {
+            is_float = true; bits = 32;
+        } else {
+            let _ = init_tx.send(Err("Hardware refused 48kHz 16/32-bit Exclusive Mode".to_string()));
+            return;
+        }
 
-    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
-    let channels = config.channels as usize;
+        let h_event = match client.set_get_eventhandle() {
+            Ok(h) => h,
+            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
+        };
+        let capture_client = match client.get_audiocaptureclient() {
+            Ok(c) => c,
+            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
+        };
+        
+        if let Err(e) = client.start_stream() {
+            let _ = init_tx.send(Err(e.to_string()));
+            return;
+        }
 
-    std::thread::spawn(move || {
+        // Notify main thread that we succeeded
+        if init_tx.send(Ok(())).is_err() {
+            let _ = client.stop_stream();
+            return;
+        }
+
+        let channels = config.channels as usize;
         let bytes_per_frame = (bits / 8) * channels;
-        // Pre-allocate a buffer large enough for a massive chunk of audio data
         let mut byte_buffer = vec![0u8; 96000 * bytes_per_frame];
 
         loop {
@@ -237,7 +269,11 @@ fn try_start_wasapi_capture(
         let _ = client.stop_stream();
     });
 
-    Ok(stop_tx)
+    match init_rx.recv() {
+        Ok(Ok(())) => Ok(stop_tx),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Thread died before initialization".to_string()),
+    }
 }
 
 pub struct AudioInputBuilder { device: Option<Device>, config: AudioConfig }
