@@ -26,9 +26,7 @@ pub struct AudioOutput {
 }
 
 #[cfg(not(target_os = "windows"))]
-struct StreamHolder {
-    _stream: Stream,
-}
+struct StreamHolder { _stream: Stream, }
 
 #[cfg(target_os = "windows")]
 struct StreamHolder {
@@ -36,7 +34,6 @@ struct StreamHolder {
     _wasapi_stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-// SAFETY: StreamHolder is Send because we never access the Stream across threads.
 unsafe impl Send for StreamHolder {}
 
 impl AudioOutput {
@@ -53,7 +50,6 @@ impl AudioOutput {
         
         let rx_mutex = Arc::new(tokio::sync::Mutex::new(rx));
 
-        // 🟢 WINDOWS EXCLUSIVE HIJACK
         #[cfg(target_os = "windows")]
         {
             let device_name = self.device.name().unwrap_or_default();
@@ -62,10 +58,7 @@ impl AudioOutput {
             match try_start_wasapi_render(&device_name, &self.config, rx_mutex.clone()) {
                 Ok(stop_tx) => {
                     log::info!("[AUDIO OUT] ✅ WASAPI Exclusive Mode locked! Transmitting bit-perfect MSK audio.");
-                    self.stream = Some(StreamHolder {
-                        _cpal_stream: None,
-                        _wasapi_stop: Some(stop_tx),
-                    });
+                    self.stream = Some(StreamHolder { _cpal_stream: None, _wasapi_stop: Some(stop_tx) });
                     return Ok(());
                 }
                 Err(e) => {
@@ -74,7 +67,6 @@ impl AudioOutput {
             }
         }
 
-        // 🟢 STANDARD CPAL FALLBACK
         let (stream_config, channels) = {
             let test_stream = self.device.build_output_stream(&requested_config, |_: &mut [f32], _| {}, |_| {}, None);
             if test_stream.is_ok() {
@@ -112,10 +104,7 @@ impl AudioOutput {
 
                 if channels == 1 {
                     let copy_len = data.len().min(buffer.len());
-                    if copy_len > 0 {
-                        data[..copy_len].copy_from_slice(&buffer[..copy_len]);
-                        buffer.drain(..copy_len);
-                    }
+                    if copy_len > 0 { data[..copy_len].copy_from_slice(&buffer[..copy_len]); buffer.drain(..copy_len); }
                     if copy_len < data.len() { data[copy_len..].fill(0.0); }
                 } else {
                     let frames = data.len() / channels;
@@ -209,12 +198,10 @@ fn try_start_wasapi_render(
 
     std::thread::spawn(move || {
         use wasapi::{initialize_mta, DeviceCollection, Direction, ShareMode, WaveFormat, SampleType};
-
         let _ = initialize_mta();
-        let collection_res = DeviceCollection::new(&Direction::Render);
-        let collection = match collection_res {
-            Ok(c) => c,
-            Err(e) => { let _ = init_tx.send(Err(format!("Collection err: {}", e))); return; }
+
+        let collection = match DeviceCollection::new(&Direction::Render) {
+            Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(format!("Collection err: {}", e))); return; }
         };
             
         let mut target_dev = None;
@@ -222,63 +209,38 @@ fn try_start_wasapi_render(
             if let Ok(dev) = collection.get_device_at_index(i) {
                 if let Ok(name) = dev.get_friendlyname() {
                     if name == device_name || device_name.contains(&name) || name.contains(&device_name) {
-                        target_dev = Some(dev);
-                        break;
+                        target_dev = Some(dev); break;
                     }
                 }
             }
         }
 
         let device = match target_dev {
-            Some(d) => d,
-            None => { let _ = init_tx.send(Err("WASAPI Device not found".to_string())); return; }
+            Some(d) => d, None => { let _ = init_tx.send(Err("WASAPI Device not found".to_string())); return; }
         };
 
         let mut client = match device.get_iaudioclient() {
-            Ok(c) => c,
-            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
+            Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
         };
 
+        // Strictly enforce 16-bit Integer PCM
         let format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
-        let format_32 = WaveFormat::new(32, 32, &SampleType::Float, config.sample_rate as usize, config.channels as usize, None);
 
-        let mut is_float = false;
-        let mut bits = 16;
-
-        if client.is_supported_exclusive_with_quirks(&format_16).is_ok() && 
-           client.initialize_client(&format_16, 100000, &Direction::Render, &ShareMode::Exclusive, false).is_ok() {
-            is_float = false; bits = 16;
-        } else if client.is_supported_exclusive_with_quirks(&format_32).is_ok() && 
-                  client.initialize_client(&format_32, 100000, &Direction::Render, &ShareMode::Exclusive, false).is_ok() {
-            is_float = true; bits = 32;
-        } else {
-            let _ = init_tx.send(Err("Hardware refused 48kHz 16/32-bit Exclusive Mode".to_string())); 
+        if client.is_supported_exclusive_with_quirks(&format_16).is_err() || 
+           client.initialize_client(&format_16, 0, &Direction::Render, &ShareMode::Exclusive, false).is_err() {
+            let _ = init_tx.send(Err("Hardware refused 48kHz 16-bit Exclusive Mode".to_string())); 
             return;
         }
 
-        let h_event = match client.set_get_eventhandle() {
-            Ok(h) => h,
-            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
-        };
-        let render_client = match client.get_audiorenderclient() {
-            Ok(c) => c,
-            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
-        };
-        
-        if let Err(e) = client.start_stream() {
-            let _ = init_tx.send(Err(e.to_string())); 
-            return;
-        }
+        let h_event = match client.set_get_eventhandle() { Ok(h) => h, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }};
+        let render_client = match client.get_audiorenderclient() { Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }};
+        if let Err(e) = client.start_stream() { let _ = init_tx.send(Err(e.to_string())); return; }
 
-        // Notify main thread
-        if init_tx.send(Ok(())).is_err() {
-            let _ = client.stop_stream(); 
-            return;
-        }
+        if init_tx.send(Ok(())).is_err() { let _ = client.stop_stream(); return; }
 
         let channels = config.channels as usize;
         let mut sample_buffer = Vec::new();
-        let byte_per_frame = (bits / 8) * channels;
+        let byte_per_frame = 2 * channels; // 16-bit = 2 bytes
 
         loop {
             if stop_rx.try_recv().is_ok() { break; }
@@ -286,33 +248,28 @@ fn try_start_wasapi_render(
 
             let frames_available = client.get_available_space_in_frames().unwrap_or(0) as usize;
             if frames_available > 0 {
-                if sample_buffer.len() < frames_available {
-                    if let Ok(mut lock) = rx.try_lock() {
-                        if let Ok(new_samples) = lock.try_recv() { sample_buffer.extend_from_slice(&new_samples); }
+                
+                // 🟢 BUG FIXED: Loop try_recv until the buffer is adequately filled to prevent stuttering zero-pads
+                if let Ok(mut lock) = rx.try_lock() {
+                    while sample_buffer.len() < frames_available {
+                        match lock.try_recv() {
+                            Ok(new_samples) => sample_buffer.extend_from_slice(&new_samples),
+                            Err(_) => break, // Queue is fully empty
+                        }
                     }
                 }
 
                 let copy_frames = frames_available.min(sample_buffer.len());
-
-                if is_float && bits == 32 {
-                    let mut data = vec![0.0f32; frames_available * channels];
-                    for i in 0..copy_frames {
-                        let s = sample_buffer[i];
-                        for ch in 0..channels { data[i * channels + ch] = s; }
-                    }
-                    sample_buffer.drain(..copy_frames);
-                    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-                    let _ = render_client.write_to_device(frames_available, byte_per_frame, bytes, None);
-                } else if !is_float && bits == 16 {
-                    let mut data = vec![0i16; frames_available * channels];
-                    for i in 0..copy_frames {
-                        let s = (sample_buffer[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                        for ch in 0..channels { data[i * channels + ch] = s; }
-                    }
-                    sample_buffer.drain(..copy_frames);
-                    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2) };
-                    let _ = render_client.write_to_device(frames_available, byte_per_frame, bytes, None);
+                let mut data = vec![0i16; frames_available * channels]; // Zero-pad the remaining array naturally
+                
+                for i in 0..copy_frames {
+                    let s = (sample_buffer[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                    for ch in 0..channels { data[i * channels + ch] = s; }
                 }
+                
+                sample_buffer.drain(..copy_frames);
+                let bytes: &[u8] = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2) };
+                let _ = render_client.write_to_device(frames_available, byte_per_frame, bytes, None);
             }
         }
         let _ = client.stop_stream();

@@ -7,18 +7,14 @@ use tokio::sync::mpsc;
 use crate::device::DeviceError;
 use crate::types::{AudioConfig, AudioSample};
 
-/// Errors related to audio input
 #[derive(Debug, thiserror::Error)]
 pub enum InputError {
     #[error("Device error: {0}")]
     DeviceError(#[from] DeviceError),
-
     #[error("Failed to build stream: {0}")]
     BuildStreamError(#[from] cpal::BuildStreamError),
-
     #[error("Failed to play stream: {0}")]
     PlayStreamError(#[from] cpal::PlayStreamError),
-
     #[error("Stream error: {0}")]
     StreamError(String),
 }
@@ -30,9 +26,7 @@ pub struct AudioInput {
 }
 
 #[cfg(not(target_os = "windows"))]
-struct StreamHolder {
-    _stream: Stream,
-}
+struct StreamHolder { _stream: Stream, }
 
 #[cfg(target_os = "windows")]
 struct StreamHolder {
@@ -40,7 +34,6 @@ struct StreamHolder {
     _wasapi_stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-// SAFETY: StreamHolder is Send because we never access the Stream across threads.
 unsafe impl Send for StreamHolder {}
 
 impl AudioInput {
@@ -55,7 +48,6 @@ impl AudioInput {
             buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
         };
 
-        // 🟢 WINDOWS EXCLUSIVE HIJACK
         #[cfg(target_os = "windows")]
         {
             let device_name = self.device.name().unwrap_or_default();
@@ -63,11 +55,8 @@ impl AudioInput {
             
             match try_start_wasapi_capture(&device_name, &self.config, tx.clone()) {
                 Ok(stop_tx) => {
-                    log::info!("[AUDIO IN] ✅ WASAPI Exclusive Mode locked! Audio Enhancements physically bypassed.");
-                    self.stream = Some(StreamHolder {
-                        _cpal_stream: None,
-                        _wasapi_stop: Some(stop_tx),
-                    });
+                    log::info!("[AUDIO IN] ✅ WASAPI Exclusive Mode locked! Hardware format matched.");
+                    self.stream = Some(StreamHolder { _cpal_stream: None, _wasapi_stop: Some(stop_tx) });
                     return Ok(());
                 }
                 Err(e) => {
@@ -76,7 +65,6 @@ impl AudioInput {
             }
         }
 
-        // 🟢 STANDARD CPAL FALLBACK (Mac/Linux/Shared)
         let (stream_config, channels) = {
             let test_stream = self.device.build_input_stream(&requested_config, |_: &[f32], _| {}, |_| {}, None);
             if test_stream.is_ok() {
@@ -103,11 +91,7 @@ impl AudioInput {
         let stream = self.device.build_input_stream(
             &stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let samples = if channels == 1 {
-                    data.to_vec()
-                } else {
-                    data.chunks(channels).map(|chunk| chunk[0]).collect()
-                };
+                let samples = if channels == 1 { data.to_vec() } else { data.chunks(channels).map(|chunk| chunk[0]).collect() };
                 let _ = tx_f32.send(samples);
             },
             move |err| { log::error!("Audio input stream error: {}", err); },
@@ -171,13 +155,10 @@ fn try_start_wasapi_capture(
 
     std::thread::spawn(move || {
         use wasapi::{initialize_mta, DeviceCollection, Direction, ShareMode, WaveFormat, SampleType};
-
         let _ = initialize_mta();
 
-        let collection_res = DeviceCollection::new(&Direction::Capture);
-        let collection = match collection_res {
-            Ok(c) => c,
-            Err(e) => { let _ = init_tx.send(Err(format!("Collection err: {}", e))); return; }
+        let collection = match DeviceCollection::new(&Direction::Capture) {
+            Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(format!("Collection err: {}", e))); return; }
         };
 
         let mut target_dev = None;
@@ -185,62 +166,37 @@ fn try_start_wasapi_capture(
             if let Ok(dev) = collection.get_device_at_index(i) {
                 if let Ok(name) = dev.get_friendlyname() {
                     if name == device_name || device_name.contains(&name) || name.contains(&device_name) {
-                        target_dev = Some(dev);
-                        break;
+                        target_dev = Some(dev); break;
                     }
                 }
             }
         }
 
         let device = match target_dev {
-            Some(d) => d,
-            None => { let _ = init_tx.send(Err("WASAPI Device not found".to_string())); return; }
+            Some(d) => d, None => { let _ = init_tx.send(Err("WASAPI Device not found".to_string())); return; }
         };
 
         let mut client = match device.get_iaudioclient() {
-            Ok(c) => c,
-            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
+            Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
         };
 
+        // Strictly enforce 16-bit Integer PCM (Radio Hardware Native)
         let format_16 = WaveFormat::new(16, 16, &SampleType::Int, config.sample_rate as usize, config.channels as usize, None);
-        let format_32 = WaveFormat::new(32, 32, &SampleType::Float, config.sample_rate as usize, config.channels as usize, None);
 
-        let mut is_float = false;
-        let mut bits = 16;
-
-        if client.is_supported_exclusive_with_quirks(&format_16).is_ok() && 
-           client.initialize_client(&format_16, 100000, &Direction::Capture, &ShareMode::Exclusive, false).is_ok() {
-            is_float = false; bits = 16;
-        } else if client.is_supported_exclusive_with_quirks(&format_32).is_ok() && 
-                  client.initialize_client(&format_32, 100000, &Direction::Capture, &ShareMode::Exclusive, false).is_ok() {
-            is_float = true; bits = 32;
-        } else {
-            let _ = init_tx.send(Err("Hardware refused 48kHz 16/32-bit Exclusive Mode".to_string()));
+        if client.is_supported_exclusive_with_quirks(&format_16).is_err() || 
+           client.initialize_client(&format_16, 0, &Direction::Capture, &ShareMode::Exclusive, false).is_err() {
+            let _ = init_tx.send(Err("Hardware refused 48kHz 16-bit Exclusive Mode".to_string()));
             return;
         }
 
-        let h_event = match client.set_get_eventhandle() {
-            Ok(h) => h,
-            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
-        };
-        let capture_client = match client.get_audiocaptureclient() {
-            Ok(c) => c,
-            Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }
-        };
-        
-        if let Err(e) = client.start_stream() {
-            let _ = init_tx.send(Err(e.to_string()));
-            return;
-        }
+        let h_event = match client.set_get_eventhandle() { Ok(h) => h, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }};
+        let capture_client = match client.get_audiocaptureclient() { Ok(c) => c, Err(e) => { let _ = init_tx.send(Err(e.to_string())); return; }};
+        if let Err(e) = client.start_stream() { let _ = init_tx.send(Err(e.to_string())); return; }
 
-        // Notify main thread that we succeeded
-        if init_tx.send(Ok(())).is_err() {
-            let _ = client.stop_stream();
-            return;
-        }
+        if init_tx.send(Ok(())).is_err() { let _ = client.stop_stream(); return; }
 
         let channels = config.channels as usize;
-        let bytes_per_frame = (bits / 8) * channels;
+        let bytes_per_frame = 2 * channels; // 16-bit = 2 bytes
         let mut byte_buffer = vec![0u8; 96000 * bytes_per_frame];
 
         loop {
@@ -254,15 +210,13 @@ fn try_start_wasapi_capture(
                 let bytes = &byte_buffer[..valid_bytes];
                 let mut f32_samples = Vec::with_capacity(frames_read as usize * channels);
 
-                if is_float && bits == 32 {
-                    let floats: &[f32] = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
-                    if channels == 1 { f32_samples.extend_from_slice(floats); } 
-                    else { for chunk in floats.chunks(channels) { if !chunk.is_empty() { f32_samples.push(chunk[0]); } } }
-                } else if !is_float && bits == 16 {
-                    let ints: &[i16] = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2) };
-                    if channels == 1 { for &s in ints { f32_samples.push(s as f32 / 32768.0); } } 
-                    else { for chunk in ints.chunks(channels) { if !chunk.is_empty() { f32_samples.push(chunk[0] as f32 / 32768.0); } } }
+                let ints: &[i16] = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const i16, bytes.len() / 2) };
+                if channels == 1 { 
+                    for &s in ints { f32_samples.push(s as f32 / 32768.0); } 
+                } else { 
+                    for chunk in ints.chunks(channels) { if !chunk.is_empty() { f32_samples.push(chunk[0] as f32 / 32768.0); } } 
                 }
+                
                 if tx.send(f32_samples).is_err() { break; }
             }
         }
