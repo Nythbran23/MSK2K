@@ -15,7 +15,7 @@ use crate::proto::{Payload, Rendered};
 use crate::engine::bus::{EngineHandle, SlotParity, SlotPeriod, UiCmd, UiEvent};
 use crate::modem::{run_transmitter_task, RxAudioCfg, RxConfigUpdate, RxDecoded, TxRequest};
 use crate::proto::{self, render_payload, Format, RxEnvelope};
-use crate::qso::{Action, EngineEvent, Intent, QsoEngine, QsoState};
+use crate::qso::{EngineEvent, Intent, QsoEngine, QsoState};
 
 /// A wrapper that ensures the external process is cleanly killed when the app closes
 /// or when the process is replaced.
@@ -877,6 +877,12 @@ async fn run_runtime(
                                     grid: grid.clone(),
                                 });
                                 let tc = if callsign.is_empty() { None } else { Some(callsign.clone()) };
+                                // 🟢 FIX: Clear was_calling_cq when a QSO partner is established.
+                                // This prevents the slot boundary TX handler from overriding mid-QSO
+                                // messages (R-report, RR, 73) with a Grid CQ packet.
+                                if !callsign.is_empty() {
+                                    was_calling_cq = false;
+                                }
                                 update_rx_config(&rx_config_tx, RxConfigUpdate::TheirCall(tc));
                             }
                             EngineEvent::QsoComplete { their, record } => {
@@ -912,15 +918,13 @@ async fn run_runtime(
                         }
                     }
 
-                    if let Action::Transmit(tx_env) = action {
-                        let _ = evt_tx.send(UiEvent::TxText { text: tx_env.raw.clone() });
-                        let _ = tx_req_tx.send(TxRequest::Text {
-                            rendered: tx_env.raw,
-                            slot_len_ms: slot_len_ms(slot_period) as u32,
-                            my_call: qso_engine.my_call.clone(),
-                            their_call: qso_engine.their_call.clone().unwrap_or_default(),
-                        });
-                    }
+                    // 🟢 FIX: Action::Transmit from on_rx() is intentionally NOT handled here.
+                    // The slot boundary timer in the 50ms tick is the sole TX trigger via next_tx().
+                    // Firing TX immediately from on_rx() caused double-transmissions and out-of-slot
+                    // transmissions because it bypassed all slot alignment logic.
+                    // The state transition from on_rx() is sufficient — the slot timer will pick it
+                    // up on the next correct TX slot boundary.
+                    let _ = action; // suppress unused variable warning
                 }
             }
             Some(update) = ham_update_rx.recv() => {

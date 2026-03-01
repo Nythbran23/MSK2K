@@ -102,6 +102,7 @@ pub enum EngineEvent {
 
 /// Action to take after processing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Action {
     None,
     Transmit(TxEnvelope),
@@ -346,7 +347,7 @@ impl QsoEngine {
             }
             // 🟢 NEW: Early termination - if they're calling CQ to someone else, they've moved on
             (QsoState::Sending73, Payload::Cq { from, .. }) 
-                if is_from_partner => {
+                if is_from_partner && self.tx_repeat_count >= 3 => {
                 ev.push(EngineEvent::Info("Partner calling CQ - terminating QSO early".into()));
                 let their = from.clone();
                 let record = self.make_qso_record();
@@ -356,7 +357,7 @@ impl QsoEngine {
             }
             // 🟢 NEW: Early termination - if they're calling someone specific, they've moved on
             (QsoState::Sending73, Payload::Call { from, .. }) 
-                if is_from_partner => {
+                if is_from_partner && self.tx_repeat_count >= 3 => {
                 ev.push(EngineEvent::Info("Partner calling someone else - terminating QSO early".into()));
                 let their = from.clone();
                 let record = self.make_qso_record();
