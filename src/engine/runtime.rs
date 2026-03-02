@@ -94,7 +94,8 @@ struct AppConfig {
     rig_port: String,
     rig_baud: String,
     slot_period: SlotPeriod,
-    ptt_delay_ms: u32,  // delay between PTT and audio TX start (0-100ms)
+    ptt_delay_ms: u32,
+    hamlib_enabled: bool,
 }
 fn config_file_path() -> std::path::PathBuf {
     let mut path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -134,6 +135,7 @@ fn load_config() -> AppConfig {
                         };
                     }
                     "ptt_delay_ms" => cfg.ptt_delay_ms = v.trim().parse().unwrap_or(0),
+                    "hamlib_enabled" => cfg.hamlib_enabled = v.trim() == "true",
                     _ => {}
                 }
             }
@@ -158,7 +160,7 @@ fn save_config(cfg: &AppConfig) {
         SlotPeriod::S15 => "15",
     };
     let data = format!(
-        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\nslot_period={}\nptt_delay_ms={}\n",
+        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\nslot_period={}\nptt_delay_ms={}\nhamlib_enabled={}\n",
         cfg.my_call,
         cfg.input_device.as_deref().unwrap_or(""),
         cfg.output_device.as_deref().unwrap_or(""),
@@ -166,7 +168,8 @@ fn save_config(cfg: &AppConfig) {
         cfg.rig_port,
         cfg.rig_baud,
         period_str,
-        cfg.ptt_delay_ms
+        cfg.ptt_delay_ms,
+        cfg.hamlib_enabled
     );
     if let Err(e) = fs::write(config_file_path(), data) {
         log::warn!("Failed to save config: {}", e);
@@ -223,6 +226,7 @@ async fn run_runtime(
         rig_baud: saved_cfg.rig_baud.clone(),
         slot_period: saved_cfg.slot_period,
         ptt_delay_ms: saved_cfg.ptt_delay_ms,
+        hamlib_enabled: saved_cfg.hamlib_enabled,
     });
 
     let mut input_device: Option<String> = saved_cfg.input_device.clone();
@@ -230,6 +234,7 @@ async fn run_runtime(
     let mut current_rig_model: String = saved_cfg.rig_model.clone();
     let mut current_rig_port: String = saved_cfg.rig_port.clone();
     let mut current_rig_baud: String = saved_cfg.rig_baud.clone();
+    let mut hamlib_cfg_enabled: bool = saved_cfg.hamlib_enabled; // persisted on/off state
     let sample_rate: u32 = 48_000;
     let buffer_size: usize = 1024;
     let mut output_level: f32 = 0.4;
@@ -249,6 +254,9 @@ async fn run_runtime(
 
     let mut observed_remote_slot: Option<u8> = None;
     let mut was_calling_cq: bool = false;
+    // Separate from was_calling_cq (which gets cleared mid-QSO to prevent grid-CQ override).
+    // return_to_cq survives the full QSO and tells the completion handler to restart CQ mode.
+    let mut return_to_cq: bool = false;
     let mut rx_needs_restart: bool = true;
     let mut diag_tick: u64 = 0; // 🔍 DIAGNOSTIC: heartbeat counter
 
@@ -296,8 +304,8 @@ async fn run_runtime(
         ));
     }
 
-    // AUTO-START HAMLIB: If saved config has rig model + port, launch rigctld once at startup
-    if !current_rig_model.is_empty() && !current_rig_port.is_empty() {
+    // AUTO-START HAMLIB: Only if enabled in saved config AND rig model + port are set
+    if saved_cfg.hamlib_enabled && !current_rig_model.is_empty() && !current_rig_port.is_empty() {
         let baud: u32 = current_rig_baud.parse().unwrap_or(19200);
         log::info!("[LAUNCHER] Auto-starting rigctld from saved config: model={} port={} baud={}", 
             current_rig_model, current_rig_port, baud);
@@ -421,14 +429,46 @@ async fn run_runtime(
                         if !tx_active { 
                             tx_active = true; 
                             let _ = evt_tx.send(UiEvent::TxActive(true)); 
-                            log::info!("⏱️ RX→TX: pausing audio, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
+                            log::info!("⏱️ RX→TX: stopping RX to free device, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
+
+                            // 🟢 LINUX FIX: PauseAudio only suspends the cpal stream callback
+                            // but keeps the ALSA device handle open. On Linux with a single USB
+                            // CODEC, the TX worker can't open the same device while RX holds the
+                            // handle. We must fully stop the RX task (releasing the handle) before
+                            // TX opens the device. On macOS/Windows this is harmless — RX restarts
+                            // cleanly after TX via rx_needs_restart.
+                            //
+                            // FlushAndStop is sent via the config channel. The task drains the
+                            // audio buffer, runs the accumulator, then breaks out of its loop.
+                            //
+                            // CRITICAL: do NOT drop rx_stop_tx before the task exits. Dropping
+                            // the sender closes the stop channel, causing stop_rx.recv() to return
+                            // None immediately. In tokio::select! this races against the FlushAndStop
+                            // config message and wins non-deterministically — the task exits without
+                            // flushing. Keep rx_stop_tx alive until after handle.await.
+                            if let Some(cfg_tx) = &rx_config_tx {
+                                let _ = cfg_tx.send(RxConfigUpdate::FlushAndStop);
+                            }
+                            if let Some(handle) = rx_task.take() {
+                                log::info!("⏱️ Awaiting RX task death before TX opens device...");
+                                let _ = handle.await;
+                                log::info!("⏱️ RX task gone, device is free for TX");
+                            }
+                            // Task has fully exited — now safe to drop both channels
+                            rx_stop_tx = None;
+                            rx_config_tx = None;
                         }
 
-                        update_rx_config(&rx_config_tx, RxConfigUpdate::PauseAudio);
-                        // PTT delay: wait between set_ptt(true) and audio stream start.
-                        // Required on Linux (single CODEC instance). Default 0ms on macOS/Windows.
+                        // 🟢 LINUX: Fixed settling delay after RX device handle is released.
+                        // The CODEC needs time to fully free the ALSA handle before TX can open it.
+                        // This is separate from and always precedes the user-configurable PTT delay.
+                        #[cfg(target_os = "linux")]
+                        sleep(Duration::from_millis(500)).await;
+
+                        // PTT delay: give the rig time to key up before audio starts.
+                        // Set in Settings → PTT TX Delay (0-100ms, default 0).
                         if ptt_delay_ms > 0 {
-                            std::thread::sleep(std::time::Duration::from_millis(ptt_delay_ms as u64));
+                            sleep(Duration::from_millis(ptt_delay_ms as u64)).await;
                         }
 
                         if let Some(payload) = qso_engine.next_tx() {
@@ -484,7 +524,7 @@ async fn run_runtime(
                                         grid: None,
                                     });
 
-                                    if was_calling_cq {
+                                    if return_to_cq {
                                         let (_, ev2) = qso_engine.on_intent(Intent::Cq);
                                         process_qso_events(&ev2, &evt_tx, &rx_config_tx);
                                         
@@ -514,9 +554,11 @@ async fn run_runtime(
                             if let Some(h) = &hamlib { h.set_ptt(false); }
                             tx_active = false;
                             let _ = evt_tx.send(UiEvent::TxActive(false));
-                            log::info!("⏱️ TX→RX: resuming audio, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
+                            log::info!("⏱️ TX→RX: PTT off, scheduling RX restart, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
                             
-                            update_rx_config(&rx_config_tx, RxConfigUpdate::ResumeAudio);
+                            // RX was fully stopped at TX start (device handle released).
+                            // Schedule a restart so the next 50ms tick picks it up.
+                            rx_needs_restart = true;
                         } else {
                             log::info!("⏱️ RX→RX: EndOfPeriod, sidx={} parity={} state={}", sidx, slot, qso_engine.state);
                             if let Some(tx) = &rx_config_tx {
@@ -543,6 +585,7 @@ async fn run_runtime(
                             rig_baud: current_rig_baud.clone(),
                             slot_period,
                             ptt_delay_ms,
+                            hamlib_enabled: hamlib_cfg_enabled,
                         });
                     }
                     UiCmd::SetSlotParity(p) => { slot_parity_cfg = p; }
@@ -553,11 +596,25 @@ async fn run_runtime(
                     }
                     
                     UiCmd::ConfigureHamlib { enabled, address } => {
+                        hamlib_cfg_enabled = enabled;
                         if enabled {
                             hamlib = Some(HamlibClient::new(address, ham_update_tx.clone()));
                         } else {
                             hamlib = None;
+                            log::info!("[ENGINE] CAT control disabled — hamlib client stopped");
                         }
+                        // Persist the enabled/disabled state immediately
+                        save_config(&AppConfig {
+                            my_call: qso_engine.my_call.clone(),
+                            input_device: input_device.clone(),
+                            output_device: output_device.clone(),
+                            rig_model: current_rig_model.clone(),
+                            rig_port: current_rig_port.clone(),
+                            rig_baud: current_rig_baud.clone(),
+                            slot_period,
+                            ptt_delay_ms,
+                            hamlib_enabled: hamlib_cfg_enabled,
+                        });
                     }
 
                     UiCmd::ConfigureLauncher { enable_launcher, rig_model, serial_port, baud_rate } => {
@@ -663,6 +720,7 @@ async fn run_runtime(
                             rig_baud: current_rig_baud.clone(),
                             slot_period,
                             ptt_delay_ms,
+                            hamlib_enabled: hamlib_cfg_enabled,
                         });
                         log::info!("[ENGINE] Audio settings applied & saved");
                     }
@@ -679,6 +737,7 @@ async fn run_runtime(
                                 rig_baud: current_rig_baud.clone(),
                                 slot_period,
                                 ptt_delay_ms,
+                                hamlib_enabled: hamlib_cfg_enabled,
                             });
                         }
                         
@@ -698,6 +757,7 @@ async fn run_runtime(
                         running = true;
                         observed_remote_slot = None;
                         was_calling_cq = false;
+                        return_to_cq = false;
                         rx_needs_restart = true;
                         
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
@@ -725,6 +785,7 @@ async fn run_runtime(
                         last_slot_index = None;
                         observed_remote_slot = None;
                         was_calling_cq = true;
+                        return_to_cq = true;
                         rx_needs_restart = true;
                         
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
@@ -750,6 +811,7 @@ async fn run_runtime(
                         last_slot_index = None;
                         observed_remote_slot = None;
                         was_calling_cq = true;
+                        return_to_cq = true;
                         rx_needs_restart = true;
                         
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
@@ -780,6 +842,7 @@ async fn run_runtime(
                         last_slot_index = None;
                         observed_remote_slot = None;
                         was_calling_cq = false;
+                        return_to_cq = false;
                         let _ = tx_req_tx.send(TxRequest::ApplyAudio {
                             output_device: output_device.clone(),
                             output_level,
@@ -815,6 +878,7 @@ async fn run_runtime(
                         running = true;
                         last_slot_index = None;
                         was_calling_cq = false;
+                        return_to_cq = false;
                         // Start watchdog when answering a CQ
                         qso_started_at = Some(std::time::Instant::now());
                         log::info!("⏰ QSO watchdog started (AnswerCq)");
@@ -843,6 +907,7 @@ async fn run_runtime(
                         
                         observed_remote_slot = None;
                         was_calling_cq = false;
+                        return_to_cq = false;
                         
                         // KILL THE RX TASK AND DROP ITS CONFIG SENDER SO IT STAYS DEAD
                         if let Some(st) = rx_stop_tx.take() { 
@@ -870,6 +935,7 @@ async fn run_runtime(
                             rig_baud: current_rig_baud.clone(),
                             slot_period,
                             ptt_delay_ms,
+                            hamlib_enabled: hamlib_cfg_enabled,
                         });
                     }
                     UiCmd::SetWatchdog(enabled) => {
@@ -965,7 +1031,7 @@ async fn run_runtime(
                                     grid: None,
                                 });
 
-                                if was_calling_cq {
+                                if return_to_cq {
                                     let (_, ev2) = qso_engine.on_intent(Intent::Cq);
                                     process_qso_events(&ev2, &evt_tx, &rx_config_tx);
                                     

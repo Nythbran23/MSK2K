@@ -37,8 +37,7 @@ pub enum RxConfigUpdate {
         slot_len_ms: u32,
     },
     EndOfPeriod,
-    PauseAudio,   // Stop audio capture (for ALSA device sharing) but keep task alive
-    ResumeAudio,  // Restart audio capture after TX
+    FlushAndStop, // Drain audio, run accumulator, then exit — used at RX→TX boundary
 }
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -105,7 +104,7 @@ pub async fn run_receiver(
     let mut accumulator = Accumulator::new(&cfg.my_call, cfg.their_call.clone());
     let mut max_retain_samples = (cfg.sample_rate as u64 * (cfg.slot_len_ms as u64 + 1000) / 1000) as usize;
     let mut retained_audio: Vec<f32> = Vec::with_capacity(max_retain_samples);
-    let mut audio_paused = false;
+
     let mut last_audio_rx_slot: u8 = 0; // Slot parity when audio was last captured
     
     // 🔍 DIAGNOSTIC: Audio level monitoring
@@ -164,48 +163,35 @@ pub async fn run_receiver(
                         accumulator.clear();
                         retained_audio.clear();
                     },
-                    RxConfigUpdate::PauseAudio => {
-                        if !audio_paused {
-                            audio_input.stop();
-                            audio_paused = true;
-
-                            while let Ok(chunk) = audio_chunk_rx.try_recv() {
-                                //for s in &mut chunk { *s *= 0.5; }
-                                retained_audio.extend_from_slice(&chunk);
-                                let candidates = extractor.push_audio(&chunk);
-                                for candidate in candidates {
-                                    accumulator.add(candidate);
-                                }
+                    RxConfigUpdate::FlushAndStop => {
+                        // RX→TX boundary: drain remaining audio, run accumulator, then exit.
+                        // Order matters: drain the channel BEFORE stopping the audio device,
+                        // otherwise the driver may discard buffered audio on stop().
+                        while let Ok(chunk) = audio_chunk_rx.try_recv() {
+                            retained_audio.extend_from_slice(&chunk);
+                            let candidates = extractor.push_audio(&chunk);
+                            for candidate in candidates {
+                                accumulator.add(candidate);
                             }
-                            extractor = MatrixSyncExtractor::new();
-
-                            let candidate_count = accumulator.candidate_count();
-                            log::debug!("[ACCUM] PauseAudio: {} candidates, rx_slot={}", candidate_count, last_audio_rx_slot);
-
-                            let utc_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-
-                            if let Some(msg) = accumulator.process() {
-                                log::debug!("[ACCUM] ✅ Accumulated decode: '{}' rx_slot={}", msg.text, last_audio_rx_slot);
-                                let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
-                                let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: last_audio_rx_slot, is_private, is_accumulated: true };
-                                let _ = decoded_tx.send(decoded);
-                            }
-                            accumulator.clear();
-                            retained_audio.clear();
-
-                            log::debug!("[RX] Audio paused (ALSA device release for TX)");
                         }
-                    },
-                    RxConfigUpdate::ResumeAudio => {
-                        if audio_paused {
-                            log::debug!("[RX] Audio resumed");
-                            let (new_audio_tx, new_audio_rx) = mpsc::unbounded_channel::<Vec<f32>>();
-                            audio_chunk_rx = new_audio_rx;
-                            if let Err(e) = audio_input.start(new_audio_tx) {
-                                log::error!("[RX] Failed to restart audio capture: {:?}", e);
-                            }
-                            audio_paused = false;
+                        audio_input.stop(); // device released after buffer is drained
+
+                        let candidate_count = accumulator.candidate_count();
+                        log::debug!("[ACCUM] FlushAndStop (RX→TX): {} candidates, rx_slot={}", candidate_count, last_audio_rx_slot);
+
+                        let utc_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+
+                        if let Some(msg) = accumulator.process() {
+                            log::debug!("[ACCUM] ✅ Accumulated decode (RX→TX): '{}' rx_slot={}", msg.text, last_audio_rx_slot);
+                            let is_private = msg.format == 2 || (msg.format == 1 && msg.to_call.as_deref().unwrap_or("CQ") != "CQ");
+                            let decoded = RxDecoded { msg, snr: None, utc_ms, rx_slot: last_audio_rx_slot, is_private, is_accumulated: true };
+                            let _ = decoded_tx.send(decoded);
                         }
+                        accumulator.clear();
+                        retained_audio.clear();
+
+                        log::info!("🛑 [RX TASK] FlushAndStop complete, releasing audio device.");
+                        break;
                     },
                 }
             }
@@ -264,11 +250,7 @@ pub async fn run_receiver(
                         if retained_audio.len() > max_retain_samples { retained_audio.clear(); }
                     }
                     None => {
-                        if audio_paused {
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        } else {
-                            break;
-                        }
+                        break; // channel closed — task exits
                     }
                 }
             }

@@ -223,7 +223,7 @@ impl Msk2kEguiApp {
     fn drain_events(&mut self) {
         while let Ok(ev) = self.engine.events.try_recv() {
             match ev {
-                UiEvent::ConfigLoaded { my_call, input_device, output_device, rig_model, rig_port, rig_baud, slot_period, ptt_delay_ms } => {
+                UiEvent::ConfigLoaded { my_call, input_device, output_device, rig_model, rig_port, rig_baud, slot_period, ptt_delay_ms, hamlib_enabled } => {
                     log::info!("[UI] ConfigLoaded event received");
                     
                     // Reset CAT state — don't trust any frequency until a fresh read arrives
@@ -234,6 +234,8 @@ impl Msk2kEguiApp {
                     if !my_call.is_empty() { self.my_call = my_call.clone(); }
                     self.slot_period = slot_period;
                     self.ptt_delay_ms = ptt_delay_ms;
+                    // 🟢 FIX: Use the persisted hamlib_enabled value — never force it true
+                    self.hamlib_enabled = hamlib_enabled;
                     
                     if let Some(in_d) = input_device {
                         if self.in_devs.contains(&in_d) { self.sel_in = Some(in_d); }
@@ -246,9 +248,8 @@ impl Msk2kEguiApp {
                     if !rig_model.is_empty() { self.rig_model = rig_model; }
                     if !rig_port.is_empty() { self.rig_port = rig_port; }
                     if !rig_baud.is_empty() { self.rig_baud = rig_baud; }
-                    if !self.rig_model.is_empty() || !self.rig_port.is_empty() {
-                        self.hamlib_enabled = true;
-                    }
+                    // 🟢 REMOVED: was forcing hamlib_enabled=true whenever rig_model/port were
+                    // set, which made the checkbox ineffective after the first save.
 
                     if !self.my_call.is_empty() && self.my_call != "NOCALL" && self.sel_in.is_some() {
                         self.is_listening = true;
@@ -783,19 +784,7 @@ impl eframe::App for Msk2kEguiApp {
                     if self.in_active_qso || !self.their_call.is_empty() {
                         ui.add_space(10.0);
                         let green = egui::Color32::from_rgb(56, 120, 70);
-                        ui.add(egui::Button::new(egui::RichText::new("IN QSO").strong().color(egui::Color32::WHITE)).fill(green).sense(egui::Sense::hover()));
-                        // Watchdog toggle button + elapsed display
-                        let wd_color = if self.watchdog_enabled {
-                            egui::Color32::from_rgb(0, 110, 60)
-                        } else {
-                            egui::Color32::from_rgb(80, 40, 40)
-                        };
-                        let wd_label = if self.watchdog_enabled { "⏰ WD" } else { "⏰ OFF" };
-                        if ui.add_sized([52.0, 24.0], egui::Button::new(wd_label).fill(wd_color)).clicked() {
-                            self.watchdog_enabled = !self.watchdog_enabled;
-                            let _ = self.engine.cmds.send(UiCmd::SetWatchdog(self.watchdog_enabled));
-                        }
-                        // Show elapsed time since QSO started
+                        // Elapsed / remaining timer
                         if let Some(started) = self.qso_started_at {
                             let elapsed = started.elapsed().as_secs();
                             let mins = elapsed / 60;
@@ -804,7 +793,7 @@ impl eframe::App for Msk2kEguiApp {
                             let rem_mins = remaining / 60;
                             let rem_secs = remaining % 60;
                             let elapsed_color = if self.watchdog_enabled && remaining < 300 {
-                                egui::Color32::from_rgb(255, 100, 50) // orange warning <5 min left
+                                egui::Color32::from_rgb(255, 100, 50)
                             } else {
                                 egui::Color32::GRAY
                             };
@@ -814,6 +803,17 @@ impl eframe::App for Msk2kEguiApp {
                                 format!("{:02}:{:02}", mins, secs)
                             };
                             ui.label(egui::RichText::new(elapsed_text).monospace().small().color(elapsed_color));
+                        }
+                        // Combined IN QSO + watchdog toggle button
+                        let wd_color = if self.watchdog_enabled {
+                            green
+                        } else {
+                            egui::Color32::from_rgb(100, 40, 40)
+                        };
+                        let wd_label = if self.watchdog_enabled { "⏰ IN QSO  WD ON" } else { "⏰ IN QSO  WD OFF" };
+                        if ui.add_sized([150.0, 30.0], egui::Button::new(egui::RichText::new(wd_label).strong().color(egui::Color32::WHITE)).fill(wd_color)).clicked() {
+                            self.watchdog_enabled = !self.watchdog_enabled;
+                            let _ = self.engine.cmds.send(UiCmd::SetWatchdog(self.watchdog_enabled));
                         }
                     }
                 });
@@ -910,6 +910,11 @@ impl eframe::App for Msk2kEguiApp {
 
             if let Some(target) = clicked_call { 
                 self.their_call = target.clone(); self.color_history_for_call(&target);
+                // Start watchdog timer here — AnswerCq doesn't emit TheirCallChanged so
+                // the timer would never appear if we relied on that event alone.
+                if self.qso_started_at.is_none() {
+                    self.qso_started_at = Some(std::time::Instant::now());
+                }
                 log::info!("⏱️ CQ CLICKED: their={} clicked_rx_slot={:?} last_rx_slot={:?}", target, clicked_rx_slot, self.last_rx_slot);
                 let _ = self.engine.cmds.send(UiCmd::SetSlotPeriod(self.slot_period));
                 let _ = self.engine.cmds.send(UiCmd::AnswerCq { 

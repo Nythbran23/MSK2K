@@ -131,6 +131,7 @@ pub enum UiEvent {
         rig_baud: String,
         slot_period: SlotPeriod,
         ptt_delay_ms: u32,
+        hamlib_enabled: bool,
     },
     RigFreqChanged {
         freq_hz: u64,
