@@ -1,15 +1,9 @@
-//! Packet decoding: soft bits → hard decisions → deinterleave → FEC → message bits
+//! Packet decoding: soft bits → deinterleave → FEC → message bits
 
-use crate::fmt1::deinterleave_format1;
-use crate::fmt2::deinterleave_format2;
+use crate::fmt1;
+use crate::fmt2;
 use crate::fec;
 use crate::rx::RxSync;
-
-// ============================================================================
-// Address Classification (DJ5HG PSK2K Design)
-// ============================================================================
-// "General" = all zeros. This is the authoritative bit-based rule.
-// ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddrKind {
@@ -17,8 +11,6 @@ pub enum AddrKind {
     Addressed,
 }
 
-/// The general address pattern from DJ5HG spec Section 4.1
-/// Used for CQ, QRZ, QST (messages to all stations)
 pub const GENERAL_ADDRESS_49: [i32; 49] = [
     1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1,
     1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1
@@ -46,6 +38,7 @@ pub struct DecodedPacket {
     pub sync_ok: bool,
 }
 
+// 🟢 MODIFIED: Removed the "packet_hard" mapping entirely. We use the raw f32 slices.
 pub fn decode_packet_soft(packet_soft: &[f32], sync: &RxSync) -> Option<DecodedPacket> {
     if !sync.found || packet_soft.len() != 258 {
         return None;
@@ -54,28 +47,21 @@ pub fn decode_packet_soft(packet_soft: &[f32], sync: &RxSync) -> Option<DecodedP
         .map(|x| (x * 100.0).round() / 100.0).collect();
     log::debug!("[DECODE] soft_bits[0..16]: {:?}", soft_sample);
 
-    let packet_hard: Vec<i32> = packet_soft
-        .iter()
-        .map(|&s| if s > 0.0 { 1 } else { 0 })
-        .collect();
-
-    // Format 1 is characterized by zero sync shift
-    // Format 2 uses non-zero sync shift (14 or 29)
     if sync.sync_shift == 0 {
-        decode_format1(&packet_hard)
+        decode_format1_soft_entry(packet_soft)
     } else {
-        decode_format2(&packet_hard, sync)
+        decode_format2_soft_entry(packet_soft, sync)
     }
 }
 
-fn decode_format1(packet_hard: &[i32]) -> Option<DecodedPacket> {
-    let (sync_bits, addr_bits, poly1, poly2) = deinterleave_format1(packet_hard);
+fn decode_format1_soft_entry(packet_soft: &[f32]) -> Option<DecodedPacket> {
+    let (sync_bits, addr_bits, poly1, poly2) = fmt1::deinterleave_format1_soft(packet_soft);
     
     let mut codeword = Vec::with_capacity(166);
     codeword.extend(poly1);
     codeword.extend(poly2);
 
-    let info_bits = fec::decode_format1(&codeword);
+    let info_bits = fec::decode_format1_soft(&codeword);
 
     Some(DecodedPacket {
         format: 1,
@@ -86,14 +72,12 @@ fn decode_format1(packet_hard: &[i32]) -> Option<DecodedPacket> {
     })
 }
 
-fn decode_format2(packet_hard: &[i32], _sync: &RxSync) -> Option<DecodedPacket> {
-    let (sync_bits, addr_bits, polys) = deinterleave_format2(packet_hard);
+fn decode_format2_soft_entry(packet_soft: &[f32], _sync: &RxSync) -> Option<DecodedPacket> {
+    let (sync_bits, addr_bits, polys) = fmt2::deinterleave_format2_soft(packet_soft);
     
     const ORDER: [&str; 9] = ["Pa", "Pb", "Pc", "Pd", "Pe", "Pf", "Pg", "Ph", "Pi"];
     
     let mut codeword = Vec::with_capacity(162);
-    
-    // TIME-MAJOR: For each time step, add all 9 polynomial outputs
     for i in 0..18 {
         for name in &ORDER {
             let bits = polys.get(*name)?;
@@ -102,10 +86,8 @@ fn decode_format2(packet_hard: &[i32], _sync: &RxSync) -> Option<DecodedPacket> 
         }
     }
     
-    let info_bits = fec::decode_format2(&codeword);
+    let info_bits = fec::decode_format2_soft(&codeword);
 
-    // Verify by re-encoding the decoded info bits and comparing to the received polynomial streams.
-    // This filters false decodes that can occur when sync locks on noise.
     const MAX_FMT2_CODEWORD_ERRORS: usize = 24;
     let expected = fec::encode_format2(&info_bits);
 
@@ -113,11 +95,13 @@ fn decode_format2(packet_hard: &[i32], _sync: &RxSync) -> Option<DecodedPacket> 
     let mut total = 0usize;
     for name in &ORDER {
         let exp = expected.get(*name)?;
-        let got = polys.get(*name)?;
-        let n = exp.len().min(got.len());
+        let got_soft = polys.get(*name)?;
+        let n = exp.len().min(got_soft.len());
         for i in 0..n {
             total += 1;
-            if exp[i] != got[i] {
+            // 🟢 Need to compare the expected hard bits with thresholded received bits 
+            let got_hard = if got_soft[i] > 0.0 { 1 } else { 0 };
+            if exp[i] != got_hard {
                 errors += 1;
             }
         }
@@ -159,8 +143,11 @@ mod tests {
             polarity: 1,
             sync_shift: 0,
             format_hint: 1,
+            sync_rotation: 0,
         };
         
+        // This continues to pass because the Soft Viterbi accurately interprets 
+        // entirely negative certainty identically to previous hard logic.
         let result = decode_packet_soft(&packet_soft, &sync);
         assert!(result.is_some());
         let decoded = result.unwrap();
