@@ -264,7 +264,7 @@ fn decode_candidate(candidate: &PacketCandidate, cfg: &RxAudioCfg, utc_ms: i64, 
     let sync = &candidate.sync;
     log::debug!("[DECODE] candidate: sync_bits={} corr={:.3} format_hint={}",
                sync.sync_bits, sync.correlation, sync.format_hint);
-    if sync.sync_bits < 35 && sync.correlation < 0.40 {
+    if sync.sync_bits < 35 && sync.correlation < 0.46 {
         log::debug!("[DECODE] rejected by gate");
         return None;
     }
