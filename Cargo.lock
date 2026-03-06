@@ -2500,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "msk2k"
-version = "0.1.59"
+version = "0.1.60"
 dependencies = [
  "anyhow",
  "chrono",
