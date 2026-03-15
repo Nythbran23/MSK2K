@@ -96,6 +96,7 @@ struct AppConfig {
     slot_period: SlotPeriod,
     ptt_delay_ms: u32,
     hamlib_enabled: bool,
+    tx_level: f32,
 }
 fn config_file_path() -> std::path::PathBuf {
     let mut path = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -136,6 +137,7 @@ fn load_config() -> AppConfig {
                     }
                     "ptt_delay_ms" => cfg.ptt_delay_ms = v.trim().parse().unwrap_or(0),
                     "hamlib_enabled" => cfg.hamlib_enabled = v.trim() == "true",
+                    "tx_level" => cfg.tx_level = v.trim().parse().unwrap_or(0.4),
                     _ => {}
                 }
             }
@@ -160,7 +162,7 @@ fn save_config(cfg: &AppConfig) {
         SlotPeriod::S15 => "15",
     };
     let data = format!(
-        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\nslot_period={}\nptt_delay_ms={}\nhamlib_enabled={}\n",
+        "my_call={}\ninput={}\noutput={}\nrig_model={}\nrig_port={}\nrig_baud={}\nslot_period={}\nptt_delay_ms={}\nhamlib_enabled={}\ntx_level={}\n",
         cfg.my_call,
         cfg.input_device.as_deref().unwrap_or(""),
         cfg.output_device.as_deref().unwrap_or(""),
@@ -169,7 +171,8 @@ fn save_config(cfg: &AppConfig) {
         cfg.rig_baud,
         period_str,
         cfg.ptt_delay_ms,
-        cfg.hamlib_enabled
+        cfg.hamlib_enabled,
+        cfg.tx_level,
     );
     if let Err(e) = fs::write(config_file_path(), data) {
         log::warn!("Failed to save config: {}", e);
@@ -237,7 +240,9 @@ async fn run_runtime(
     let mut hamlib_cfg_enabled: bool = saved_cfg.hamlib_enabled; // persisted on/off state
     let sample_rate: u32 = 48_000;
     let buffer_size: usize = 1024;
-    let mut output_level: f32 = 0.4;
+    let mut output_level: f32 = saved_cfg.tx_level.clamp(0.0, 1.0);
+    // Guard against an uninitialised config file that has tx_level=0 (would produce silence)
+    if output_level == 0.0 { output_level = 0.4; }
     let decode_window_secs: f32 = 4.0;
 
     let mut qso_engine = QsoEngine::new(saved_cfg.my_call.clone());
@@ -586,6 +591,7 @@ async fn run_runtime(
                             slot_period,
                             ptt_delay_ms,
                             hamlib_enabled: hamlib_cfg_enabled,
+                            tx_level: output_level,
                         });
                     }
                     UiCmd::SetSlotParity(p) => { slot_parity_cfg = p; }
@@ -593,6 +599,18 @@ async fn run_runtime(
                     UiCmd::SetTxLevel(level) => { 
                         output_level = level.clamp(0.0, 1.0);
                         log::info!("[ENGINE] TX level set to {:.0}%", output_level * 100.0);
+                        save_config(&AppConfig {
+                            my_call: qso_engine.my_call.clone(),
+                            input_device: input_device.clone(),
+                            output_device: output_device.clone(),
+                            rig_model: current_rig_model.clone(),
+                            rig_port: current_rig_port.clone(),
+                            rig_baud: current_rig_baud.clone(),
+                            slot_period,
+                            ptt_delay_ms,
+                            hamlib_enabled: hamlib_cfg_enabled,
+                            tx_level: output_level,
+                        });
                     }
                     
                     UiCmd::ConfigureHamlib { enabled, address } => {
@@ -614,6 +632,7 @@ async fn run_runtime(
                             slot_period,
                             ptt_delay_ms,
                             hamlib_enabled: hamlib_cfg_enabled,
+                            tx_level: output_level,
                         });
                     }
 
@@ -721,6 +740,7 @@ async fn run_runtime(
                             slot_period,
                             ptt_delay_ms,
                             hamlib_enabled: hamlib_cfg_enabled,
+                            tx_level: output_level,
                         });
                         log::info!("[ENGINE] Audio settings applied & saved");
                     }
@@ -738,6 +758,7 @@ async fn run_runtime(
                                 slot_period,
                                 ptt_delay_ms,
                                 hamlib_enabled: hamlib_cfg_enabled,
+                                tx_level: output_level,
                             });
                         }
                         
@@ -936,6 +957,7 @@ async fn run_runtime(
                             slot_period,
                             ptt_delay_ms,
                             hamlib_enabled: hamlib_cfg_enabled,
+                            tx_level: output_level,
                         });
                     }
                     UiCmd::SetWatchdog(enabled) => {

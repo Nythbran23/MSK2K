@@ -210,6 +210,33 @@ impl Msk2kEguiApp {
         }
     }
 
+    fn refresh_audio_devices(&mut self) {
+        log::info!("[AUDIO] Refreshing device list...");
+        let (new_in, new_out) = enumerate_audio_devices();
+        self.in_devs = new_in;
+        self.out_devs = new_out;
+
+        // Validate current input selection — clear if the device is no longer present.
+        // This handles the USB codec swap case (e.g. IC-9700 → IC-7300) where macOS
+        // may not have invalidated the old device entry until we re-enumerate.
+        if let Some(ref sel) = self.sel_in.clone() {
+            if !self.in_devs.contains(sel) {
+                log::warn!("[AUDIO] Saved input device '{}' not found after refresh — clearing selection", sel);
+                self.sel_in = None;
+            }
+        }
+
+        // Validate current output selection likewise.
+        if let Some(ref sel) = self.sel_out.clone() {
+            if !self.out_devs.contains(sel) {
+                log::warn!("[AUDIO] Saved output device '{}' not found after refresh — clearing selection", sel);
+                self.sel_out = None;
+            }
+        }
+
+        log::info!("[AUDIO] Refresh complete — {} input(s), {} output(s)", self.in_devs.len(), self.out_devs.len());
+    }
+
     fn calc_report(&self) -> i16 { report_from_correlation(self.last_corr).parse().unwrap_or(27) }
 
     fn color_history_for_call(&mut self, call: &str) {
@@ -238,11 +265,17 @@ impl Msk2kEguiApp {
                     self.hamlib_enabled = hamlib_enabled;
                     
                     if let Some(in_d) = input_device {
-                        if self.in_devs.contains(&in_d) { self.sel_in = Some(in_d); }
+                        // Always restore the saved device name — refresh_audio_devices() will
+                        // clear it if the device has genuinely gone away (e.g. USB codec swap).
+                        self.sel_in = Some(in_d);
                     }
                     if let Some(out_d) = output_device {
-                        if self.out_devs.contains(&out_d) { self.sel_out = Some(out_d); }
+                        self.sel_out = Some(out_d);
                     }
+
+                    // Re-enumerate now so the dropdowns show the current hardware state,
+                    // and any stale saved device that is no longer present gets cleared.
+                    self.refresh_audio_devices();
 
                     // Restore rig settings from config
                     if !rig_model.is_empty() { self.rig_model = rig_model; }
@@ -544,6 +577,22 @@ impl eframe::App for Msk2kEguiApp {
                 
                 ui.separator();
                 ui.heading("Audio Hardware");
+
+                // Refresh button — re-enumerates devices from the OS.
+                // Use this after swapping USB codecs (e.g. IC-9700 → IC-7300) so that
+                // macOS flushes its stale device registry and the correct pair appears.
+                ui.horizontal(|ui| {
+                    if ui.button("🔄 Refresh Devices").on_hover_text(
+                        "Re-scan audio hardware.\nUse after swapping USB radios to clear stale device entries."
+                    ).clicked() {
+                        self.refresh_audio_devices();
+                    }
+                    if self.sel_in.is_none() && self.sel_out.is_none() {
+                        ui.label(egui::RichText::new("⚠ No device selected").small().color(egui::Color32::from_rgb(255, 180, 0)));
+                    }
+                });
+
+                ui.add_space(4.0);
                 ui.label("Input Device:");
                 egui::ComboBox::from_id_salt("in_dev").selected_text(self.sel_in.clone().unwrap_or_else(|| "Default".into())).show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.sel_in, None, "Default");
@@ -697,6 +746,7 @@ impl eframe::App for Msk2kEguiApp {
                     if ui.button("⚙").clicked() { 
                         self.settings_open = true; 
                         self.refresh_serial_ports();
+                        self.refresh_audio_devices();
                     }
                     ui.label(egui::RichText::new(chrono::Utc::now().format("%H:%M:%S Z").to_string()).monospace());
                 });
