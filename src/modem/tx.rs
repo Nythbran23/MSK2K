@@ -51,6 +51,23 @@ pub async fn run_transmitter_task(
     let mut cfg = TxAudioCfg::default();
     let codec = CallsignCodec::new();
 
+    // ── Windows: persistent output stream ──────────────────────────────────
+    // On Windows (WASAPI shared mode) opening and closing the output stream
+    // produces a transient each time that is loud enough to trigger VOX during
+    // the RX period.  We therefore open the stream once and keep it alive for
+    // the lifetime of the session, sending waveform data when transmitting and
+    // letting WASAPI fill with silence automatically when we send nothing.
+    //
+    // On Linux the RX and TX share a single USB codec; the RX task holds the
+    // device handle and must release it before TX can open it, so we must still
+    // close and reopen the device each time on that platform.
+    //
+    // macOS (CoreAudio) supports concurrent streams and is unaffected by either
+    // approach, so it follows the non-Windows (open/close) path for simplicity.
+    // ──────────────────────────────────────────────────────────────────────────
+    #[cfg(target_os = "windows")]
+    let mut win_stream: Option<(AudioOutput, mpsc::UnboundedSender<Vec<f32>>)> = None;
+
     info!("[TX] worker started");
 
     while let Some(req) = tx_req_rx.recv().await {
@@ -63,6 +80,10 @@ pub async fn run_transmitter_task(
                 my_call,
                 their_call,
             } => {
+                // Detect device change so we know whether to reopen on Windows.
+                #[cfg(target_os = "windows")]
+                let device_changed = cfg.output_device != output_device;
+
                 cfg.output_device = output_device;
                 cfg.output_level = output_level;
                 cfg.sample_rate = sample_rate;
@@ -75,24 +96,33 @@ pub async fn run_transmitter_task(
                     cfg.output_device, cfg.sample_rate, cfg.buffer_size,
                     cfg.my_call, cfg.their_call
                 );
+
+                // Windows: open (or reopen on device change) the persistent stream now
+                // so it is already running before the first TX slot arrives.
+                #[cfg(target_os = "windows")]
+                if device_changed || win_stream.is_none() {
+                    win_stream = None; // drop / close previous stream first
+                    match build_output_and_sender(&cfg) {
+                        Ok(s) => {
+                            info!("[TX] Windows persistent output stream opened on '{:?}'", cfg.output_device);
+                            win_stream = Some(s);
+                        }
+                        Err(e) => warn!("[TX] Failed to open persistent output stream: {}", e),
+                    }
+                }
             }
 
             TxRequest::Stop => {
+                #[cfg(target_os = "windows")]
+                {
+                    win_stream = None;
+                    info!("[TX] Windows persistent stream closed on STOP");
+                }
                 info!("[TX] STOP");
             }
 
             // 🟢 GRID MODE: Raw bits from runtime (already 71 bits)
             TxRequest::RawBits { bits, slot_len_ms, my_call, their_call: _ } => {
-                let (out_stream, audio_tx) = match build_output_and_sender(&cfg) {
-                    Ok(res) => res,
-                    Err(e) => {
-                         warn!("[TX] Failed to open audio: {}", e);
-                         continue;
-                    }
-                };
-
-                info!("[TX] CQ+Grid request from={} (71-bit packet)", my_call);
-
                 // 🟢 CRITICAL: Bits are already 71 bits from encode_cq_with_grid()
                 // They contain: 55 data + 2 type + 15 CRC
                 let waveform = match generate_transmission_from_bits(&bits, &codec, cfg.sample_rate, slot_len_ms) {
@@ -105,28 +135,47 @@ pub async fn run_transmitter_task(
 
                 let output_scalar = cfg.output_level;
                 let scaled: Vec<f32> = waveform.iter().map(|&s| s * output_scalar).collect();
+                let duration_secs = scaled.len() as f32 / cfg.sample_rate as f32;
+                let wait_ms = (duration_secs * 1000.0) as u64 + 500;
 
-                if let Err(e) = audio_tx.send(scaled.clone()) {
-                    warn!("[TX] Failed to send grid waveform: {}", e);
-                } else {
-                    let duration_secs = scaled.len() as f32 / cfg.sample_rate as f32;
-                    info!("[TX] 📤 Sent {} Grid samples ({:.2}s)", scaled.len(), duration_secs);
-                    drop(audio_tx);
-                    let wait_ms = (duration_secs * 1000.0) as u64 + 500;
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                info!("[TX] CQ+Grid request from={} (71-bit packet)", my_call);
+
+                #[cfg(target_os = "windows")]
+                {
+                    // Reuse the persistent stream — no open/close transient.
+                    if let Some((_, ref audio_tx)) = win_stream {
+                        if let Err(e) = audio_tx.send(scaled) {
+                            warn!("[TX] Failed to send grid waveform to persistent stream: {}", e);
+                        } else {
+                            info!("[TX] 📤 Sent {} Grid samples ({:.2}s) [persistent]", 
+                                (duration_secs * cfg.sample_rate as f32) as usize, duration_secs);
+                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        }
+                    } else {
+                        warn!("[TX] No persistent stream — falling back to open/close for this TX");
+                        tx_rawbits_open_close(&cfg, scaled, duration_secs, wait_ms).await;
+                    }
                 }
-                drop(out_stream);
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // Linux / macOS: open device, transmit, close device.
+                    let (out_stream, audio_tx) = match build_output_and_sender(&cfg) {
+                        Ok(res) => res,
+                        Err(e) => { warn!("[TX] Failed to open audio: {}", e); continue; }
+                    };
+                    if let Err(e) = audio_tx.send(scaled.clone()) {
+                        warn!("[TX] Failed to send grid waveform: {}", e);
+                    } else {
+                        info!("[TX] 📤 Sent {} Grid samples ({:.2}s)", scaled.len(), duration_secs);
+                        drop(audio_tx);
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    }
+                    drop(out_stream);
+                }
             }
 
             TxRequest::Text { rendered, slot_len_ms, my_call, their_call } => {
-                let (out_stream, audio_tx) = match build_output_and_sender(&cfg) {
-                    Ok(res) => res,
-                    Err(e) => {
-                         warn!("[TX] Failed to open audio: {}", e);
-                         continue;
-                    }
-                };
-
                 info!("[TX] Text request: '{}' my={} their={}", rendered, my_call, their_call);
 
                 let is_short_fmt2 = is_short_format2(&rendered);
@@ -135,7 +184,7 @@ pub async fn run_transmitter_task(
                 } else {
                     message_from_rendered(&rendered)
                 };
-                
+
                 let msg = match msg_result {
                     Ok(m) => m,
                     Err(e) => {
@@ -154,22 +203,83 @@ pub async fn run_transmitter_task(
 
                 let output_scalar = cfg.output_level;
                 let scaled: Vec<f32> = waveform.iter().map(|&s| s * output_scalar).collect();
+                let duration_secs = scaled.len() as f32 / cfg.sample_rate as f32;
+                let wait_ms = (duration_secs * 1000.0) as u64 + 500;
 
-                if let Err(e) = audio_tx.send(scaled.clone()) {
-                    warn!("[TX] Failed to send waveform to audio driver: {}", e);
-                } else {
-                    let duration_secs = scaled.len() as f32 / cfg.sample_rate as f32;
-                    info!("[TX] 📤 Sent {} samples ({:.2}s)", scaled.len(), duration_secs);
-                    drop(audio_tx);
-                    let wait_ms = (duration_secs * 1000.0) as u64 + 500;
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                    info!("[TX] ✅ TX complete");
+                #[cfg(target_os = "windows")]
+                {
+                    // Reuse the persistent stream — no open/close transient.
+                    if let Some((_, ref audio_tx)) = win_stream {
+                        if let Err(e) = audio_tx.send(scaled) {
+                            warn!("[TX] Failed to send waveform to persistent stream: {}", e);
+                        } else {
+                            info!("[TX] 📤 Sent {} samples ({:.2}s) [persistent]",
+                                (duration_secs * cfg.sample_rate as f32) as usize, duration_secs);
+                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                            info!("[TX] ✅ TX complete");
+                        }
+                    } else {
+                        warn!("[TX] No persistent stream — falling back to open/close for this TX");
+                        tx_text_open_close(&cfg, scaled, duration_secs, wait_ms).await;
+                    }
                 }
-                drop(out_stream);
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // Linux / macOS: open device, transmit, close device.
+                    let (out_stream, audio_tx) = match build_output_and_sender(&cfg) {
+                        Ok(res) => res,
+                        Err(e) => { warn!("[TX] Failed to open audio: {}", e); continue; }
+                    };
+                    if let Err(e) = audio_tx.send(scaled.clone()) {
+                        warn!("[TX] Failed to send waveform to audio driver: {}", e);
+                    } else {
+                        info!("[TX] 📤 Sent {} samples ({:.2}s)", scaled.len(), duration_secs);
+                        drop(audio_tx);
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        info!("[TX] ✅ TX complete");
+                    }
+                    drop(out_stream);
+                }
             }
         }
     }
     Ok(())
+}
+
+// ── Fallback open/close helpers (Windows path only, when persistent stream unavailable) ──
+
+#[cfg(target_os = "windows")]
+async fn tx_rawbits_open_close(cfg: &TxAudioCfg, scaled: Vec<f32>, duration_secs: f32, wait_ms: u64) {
+    let (out_stream, audio_tx) = match build_output_and_sender(cfg) {
+        Ok(res) => res,
+        Err(e) => { warn!("[TX] Failed to open audio: {}", e); return; }
+    };
+    if let Err(e) = audio_tx.send(scaled) {
+        warn!("[TX] Failed to send grid waveform: {}", e);
+    } else {
+        info!("[TX] 📤 Sent Grid samples ({:.2}s) [open/close fallback]", duration_secs);
+        drop(audio_tx);
+        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+    }
+    drop(out_stream);
+}
+
+#[cfg(target_os = "windows")]
+async fn tx_text_open_close(cfg: &TxAudioCfg, scaled: Vec<f32>, duration_secs: f32, wait_ms: u64) {
+    let (out_stream, audio_tx) = match build_output_and_sender(cfg) {
+        Ok(res) => res,
+        Err(e) => { warn!("[TX] Failed to open audio: {}", e); return; }
+    };
+    if let Err(e) = audio_tx.send(scaled) {
+        warn!("[TX] Failed to send waveform to audio driver: {}", e);
+    } else {
+        info!("[TX] 📤 Sent samples ({:.2}s) [open/close fallback]", duration_secs);
+        drop(audio_tx);
+        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+        info!("[TX] ✅ TX complete");
+    }
+    drop(out_stream);
 }
 
 /// 🟢 NEW: Waveform generator for 71-bit CQ+Grid packets
