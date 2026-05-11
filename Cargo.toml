@@ -11,6 +11,15 @@ default-run = "msk2k"
 name = "msk2k"
 path = "src/main.rs"
 
+[[bin]]
+name = "fsk441rx"
+path = "src/fsk441rx/main.rs"
+
+[[bin]]
+name = "fsk441"
+path = "src/fsk441rx/app.rs"
+
+
 [dependencies]
 # Local crates
 msk2k_audio = { path = "crates/msk2k_audio" }
@@ -31,6 +40,12 @@ serialport = "4.2"
 image = "0.25"
 rand = "0.8"
 rand_distr = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+regex    = "1"
+hound        = "3.5"
+rubato       = "0.15"
+rustfft      = "6"
+num-complex  = "0.4"
 
 [workspace]
 members = [
@@ -43,5 +58,6 @@ resolver = "2"
 opt-level = 3
 lto = true
 codegen-units = 1
+strip         = true
 
 

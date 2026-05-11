@@ -6,10 +6,9 @@
 // RX (stubs for now): demodulate_48k(audio)->baseband, find_sync(baseband)->RxSync,
 //                     extract_packet_soft(baseband, sync)->Option<Vec<f32>>
 //
-// The TX modulator below is intended to match Python MSK2KModulator in msk2k_complete.py:
 // - sample_rate = 48000
 // - bit_rate    = 2000  => samples_per_bit = 24
-// - carrier     = 1500 Hz
+// - carrier     = 1350Hz
 // - per-bit phase step = ±pi/2
 // - per-sample phase uses (j + 0.5) center sampling
 // - output normalized by peak abs
@@ -63,7 +62,6 @@ pub fn modulate_48k(bits: &[i32]) -> Vec<f32> {
         for j in 0..samples_per_bit {
             let idx = i * samples_per_bit + j;
 
-            // Python: phase[idx] = current_phase + phase_rate * (j + 0.5)
             let ph = current_phase + phase_rate * ((j as f32) + half);
 
             let t = (idx as f32) / SAMPLE_RATE;
@@ -97,18 +95,13 @@ pub fn modulate_48k(bits: &[i32]) -> Vec<f32> {
 // =====================
 
 /// Demodulate 48 kHz MSK audio into a "soft" baseband stream.
-/// In your Python goldens this is currently length 258 (for the test vector),
-/// but in real use it could be longer.
 pub fn demodulate_48k(_audio: &[f32]) -> Vec<f32> {
-    // TODO: implement MSK demod path to match Python:
-    // - matched filter / integrate-and-dump at 24 samples/bit
-    // - produce soft values per bit
     Vec::new()
 }
 
 /// Find sync in the demodulated baseband soft stream.
 pub fn find_sync(_baseband: &[f32]) -> RxSync {
-    // TODO: implement sync correlation, polarity, rotation, etc.
+  
     RxSync {
         found: false,
         correlation: 0.0,
@@ -120,9 +113,8 @@ pub fn find_sync(_baseband: &[f32]) -> RxSync {
     }
 }
 
-/// Extract the 258 "packet soft bits" (or whatever fixed size your Python uses)
-/// given the baseband stream and sync result.
+/// Extract the 258 "packet soft bits" 
 pub fn extract_packet_soft(_baseband: &[f32], _sync: &RxSync) -> Option<Vec<f32>> {
-    // TODO: implement extraction windowing/rotation/polarity handling
+    
     None
 }

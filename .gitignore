@@ -24,4 +24,21 @@ msk2k.cfg
 .Spotlight-V100
 .Trashes
 ehthumbs.db
-Thumbs.dbgighub pat.txt
+Thumbs.db
+
+# Finder duplicate files
+* 2.rs
+* 2.toml
+
+# FSK441 capture data (binary, large, kept outside repo)
+*.db
+*.db-shm
+*.db-wal
+*.wav
+*.tar.xz
+pings.txt
+cty.dat
+
+# Secrets — never commit credentials
+*pat.txt
+*token*.txt
